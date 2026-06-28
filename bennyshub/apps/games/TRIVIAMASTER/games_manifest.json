@@ -1,0 +1,37 @@
+[
+    {
+        "name": "Geography",
+        "path": "trivia_games/Geography.json",
+        "image": ""
+    },
+        {
+        "name": "History",
+        "path": "trivia_games/History.json",
+        "image": ""
+    },
+    {
+        "name": "Math",
+        "path": "trivia_games/Math.json",
+        "image": ""
+    },
+    {
+        "name": "Pop Culture",
+        "path": "trivia_games/Pop Culture.json",
+        "image": ""
+    },
+        {
+        "name": "Science",
+        "path": "trivia_games/Science.json",
+        "image": ""
+    },
+    {
+        "name": "Sports",
+        "path": "trivia_games/Sports.json",
+        "image": ""
+    },
+    {
+        "name": "TV",
+        "path": "trivia_games/TV.json",
+        "image": ""
+    }
+]

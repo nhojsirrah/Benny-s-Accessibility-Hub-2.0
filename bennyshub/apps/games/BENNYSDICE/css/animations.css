@@ -1,0 +1,55 @@
+
+/* Animations */
+@keyframes popIn {
+    0% { transform: translate(-50%, -50%) scale(0); opacity: 0; }
+    50% { transform: translate(-50%, -50%) scale(1.2); opacity: 1; }
+    100% { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+}
+
+@keyframes floatUp {
+    0% { transform: translate(-50%, -50%) translateY(0); opacity: 1; }
+    100% { transform: translate(-50%, -50%) translateY(-100px); opacity: 0; }
+}
+
+@keyframes shake {
+    0%, 100% { transform: translate(-50%, -50%) rotate(0deg); }
+    25% { transform: translate(-50%, -50%) rotate(-10deg); }
+    75% { transform: translate(-50%, -50%) rotate(10deg); }
+}
+
+.popup-text {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 4rem;
+    font-weight: bold;
+    color: white;
+    text-shadow: 0 0 10px rgba(0,0,0,0.8);
+    pointer-events: none;
+    z-index: 1000;
+    white-space: nowrap;
+}
+
+.popup-text.bust {
+    color: #ff3333;
+    animation: popIn 0.3s forwards, shake 0.5s 0.3s, floatUp 1s 1.5s forwards;
+}
+
+.popup-text.bank {
+    color: #4CAF50;
+    animation: popIn 0.3s forwards, floatUp 1.5s 1s forwards;
+}
+
+.popup-text.score {
+    color: #FFD700;
+    font-size: 3rem;
+    animation: popIn 0.2s forwards, floatUp 1s 0.8s forwards;
+}
+
+.popup-text.win {
+    color: #FFD700;
+    font-size: 5rem;
+    text-shadow: 0 0 20px #ff6600;
+    animation: popIn 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+}
