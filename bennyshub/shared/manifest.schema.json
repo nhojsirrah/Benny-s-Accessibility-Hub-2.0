@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://bennyshub/manifest.schema.json",
+  "title": "Benny's Hub App Manifest Entry",
+  "description": "Contract for a single app entry in games.json / tools.json. Every entry must carry the current required fields plus a launch target (path or launchExternal). IP-4 adds optional extended fields used by the lifecycle/contract work; they are not required so existing manifests keep validating.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "description", "image", "genres"],
+  "anyOf": [{ "required": ["path"] }, { "required": ["launchExternal"] }],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable unique identifier for the app."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable name shown in the hub."
+    },
+    "description": {
+      "type": "string",
+      "description": "Short blurb shown in the hub."
+    },
+    "image": {
+      "type": "string",
+      "description": "Relative path to the tile image."
+    },
+    "genres": {
+      "type": "array",
+      "description": "Category tags used for filtering/grouping.",
+      "items": { "type": "string" }
+    },
+    "path": {
+      "type": "string",
+      "description": "Relative path to the app's HTML entry point. Either path or launchExternal is required."
+    },
+    "launchExternal": {
+      "type": "string",
+      "description": "Name of an external launcher handled by the hub instead of an in-app path."
+    },
+    "needsServer": {
+      "type": "boolean",
+      "description": "App requires the local editor/companion server to be running."
+    },
+    "launchWindow": {
+      "type": "boolean",
+      "description": "App should open in its own window rather than the hub frame."
+    },
+    "type": {
+      "type": "string",
+      "description": "IP-4: explicit app kind.",
+      "enum": ["game", "tool"]
+    },
+    "entry": {
+      "type": "string",
+      "description": "IP-4: normalized entry point (forward-looking replacement for path)."
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "IP-4: declared runtime capabilities used to gate launch.",
+      "additionalProperties": false,
+      "properties": {
+        "needsElectron": {
+          "type": "boolean",
+          "description": "App requires the Electron host (not browser-only)."
+        },
+        "usesPhysics": {
+          "type": "boolean",
+          "description": "App runs a physics simulation."
+        },
+        "twoPlayer": {
+          "type": "boolean",
+          "description": "App supports a two-player mode."
+        }
+      }
+    },
+    "controls": {
+      "type": "string",
+      "description": "IP-4: control contract the app implements, e.g. 'scan-core@1'."
+    },
+    "settingsSchema": {
+      "type": "object",
+      "description": "IP-4: app-specific settings schema surfaced by the hub."
+    },
+    "version": {
+      "type": "string",
+      "description": "IP-4: app version string."
+    }
+  }
+}
