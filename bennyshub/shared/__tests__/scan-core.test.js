@@ -330,6 +330,76 @@ describe("Hold Enter -> pause", () => {
   });
 });
 
+describe("Hold Enter -> pause repeat (onPauseRepeatMs)", () => {
+  test("with onPauseRepeatMs set, onPause fires once then repeats while held", () => {
+    const { controller, onPause } = buildController({
+      options: { onPauseRepeatMs: 2000 },
+    });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(4999);
+    expect(onPause).not.toHaveBeenCalled();
+
+    // Cross the hold threshold -> first onPause.
+    jest.advanceTimersByTime(1); // total 5000
+    expect(onPause).toHaveBeenCalledTimes(1);
+
+    // Then onPause every onPauseRepeatMs (2000) while Enter stays held.
+    jest.advanceTimersByTime(2000);
+    expect(onPause).toHaveBeenCalledTimes(2);
+    jest.advanceTimersByTime(2000);
+    expect(onPause).toHaveBeenCalledTimes(3);
+    jest.advanceTimersByTime(4000); // two more ticks
+    expect(onPause).toHaveBeenCalledTimes(5);
+  });
+
+  test("Enter keyup stops the pause repeat (and does not also select)", () => {
+    const { controller, onPause, onSelect } = buildController({
+      options: { onPauseRepeatMs: 2000 },
+    });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(5000); // first onPause
+    jest.advanceTimersByTime(2000); // one repeat
+    expect(onPause).toHaveBeenCalledTimes(2);
+
+    dispatchKey("keyup", "Enter");
+    jest.advanceTimersByTime(10000);
+    expect(onPause).toHaveBeenCalledTimes(2); // no further repeats
+    expect(onSelect).not.toHaveBeenCalled(); // pause already consumed the press
+  });
+
+  test("detach stops the pause repeat", () => {
+    const { controller, onPause } = buildController({
+      options: { onPauseRepeatMs: 2000 },
+    });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(5000);
+    expect(onPause).toHaveBeenCalledTimes(1);
+
+    controller.detach();
+    jest.advanceTimersByTime(10000);
+    expect(onPause).toHaveBeenCalledTimes(1); // repeat stopped on detach
+  });
+
+  test("without onPauseRepeatMs, onPause fires exactly once (regression)", () => {
+    const { controller, onPause } = buildController();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(5000);
+    expect(onPause).toHaveBeenCalledTimes(1);
+
+    // Even a long continued hold fires only once.
+    jest.advanceTimersByTime(20000);
+    expect(onPause).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("Focus / announce callbacks", () => {
   test("onFocus and onAnnounce receive the right target and index", () => {
     const { controller, onFocus, onAnnounce, targets } = buildController();
