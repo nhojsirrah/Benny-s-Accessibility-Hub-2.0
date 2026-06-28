@@ -55,6 +55,14 @@ class ScanController {
       typeof opts.onAnnounce === "function" ? opts.onAnnounce : null;
     this.onPause = typeof opts.onPause === "function" ? opts.onPause : null;
 
+    // Optional repeat for the Enter-hold pause: when set (a number) AND onPause
+    // is provided, onPause fires once at the hold threshold and then repeats
+    // every onPauseRepeatMs while Enter stays held. Undefined => fire once only.
+    this.onPauseRepeatMs =
+      typeof opts.onPauseRepeatMs === "number"
+        ? opts.onPauseRepeatMs
+        : undefined;
+
     // Behavior options.
     this.wrap = opts.wrap !== undefined ? !!opts.wrap : true;
     this.spaceHoldMs = opts.spaceHoldMs !== undefined ? opts.spaceHoldMs : 3000;
@@ -105,6 +113,7 @@ class ScanController {
     this._enterHeld = false;
     this._enterHoldTimer = null;
     this._pauseTriggered = false;
+    this._pauseRepeatInterval = null;
 
     // Auto-scan state.
     this._autoScanInterval = null;
@@ -139,6 +148,8 @@ class ScanController {
     this._attachedEl.removeEventListener("keydown", this._boundKeyDown, true);
     this._attachedEl.removeEventListener("keyup", this._boundKeyUp, true);
     this._attachedEl = null;
+    // Stop any in-flight pause repeat so a detach mid-hold leaves no timer.
+    this._clearPauseRepeat();
     return this;
   }
 
@@ -190,7 +201,16 @@ class ScanController {
       this._clearEnterTimers();
       this._enterHoldTimer = setTimeout(() => {
         this._pauseTriggered = true;
-        if (this.onPause) this.onPause();
+        if (this.onPause) {
+          this.onPause();
+          // Optional repeat: keep firing onPause while Enter stays held.
+          if (this.onPauseRepeatMs !== undefined) {
+            this._pauseRepeatInterval = setInterval(
+              () => this.onPause(),
+              this.onPauseRepeatMs,
+            );
+          }
+        }
       }, this.enterHoldMs);
       return;
     }
@@ -241,6 +261,14 @@ class ScanController {
     if (this._enterHoldTimer !== null) {
       clearTimeout(this._enterHoldTimer);
       this._enterHoldTimer = null;
+    }
+    this._clearPauseRepeat();
+  }
+
+  _clearPauseRepeat() {
+    if (this._pauseRepeatInterval !== null) {
+      clearInterval(this._pauseRepeatInterval);
+      this._pauseRepeatInterval = null;
     }
   }
 
