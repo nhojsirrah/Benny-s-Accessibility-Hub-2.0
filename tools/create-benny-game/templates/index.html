@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>__TITLE__</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="game-container">
+      <div id="header">
+        <div id="status-display" aria-live="polite">__TITLE__</div>
+      </div>
+      <!-- The game wires its scan targets into #game-root. -->
+      <main id="game-root" role="application" aria-label="__TITLE__"></main>
+    </div>
+
+    <!-- Shared accessibility stack. Order matters: managers, then the
+         ScanController core, then the BennyGame base class, then this game. -->
+    <script src="../../../shared/voice-manager.js"></script>
+    <script src="../../../shared/ios-audio-fix.js"></script>
+    <script src="../../../shared/scan-manager.js"></script>
+    <script src="../../../shared/scan-core.js"></script>
+    <script src="../../../shared/benny-app.js"></script>
+    <script src="js/app.js"></script>
+  </body>
+</html>
