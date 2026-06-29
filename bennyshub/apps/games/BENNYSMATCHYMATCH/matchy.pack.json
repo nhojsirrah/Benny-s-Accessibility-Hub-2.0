@@ -1,0 +1,18 @@
+{
+  "id": "matchy-animals-easy",
+  "title": "MatchyMatch — Animals (Easy)",
+  "board": { "rows": 4, "cols": 4 },
+  "scanOrder": "row-col",
+  "difficulty": "easy",
+  "timing": { "mismatchHideMs": 3000 },
+  "tiles": [
+    { "id": "dog", "label": "Dog", "image": "packs/dog.png" },
+    { "id": "cat", "label": "Cat", "image": "packs/cat.png" },
+    { "id": "fish", "label": "Fish", "image": "packs/fish.svg" },
+    { "id": "turtle", "label": "Turtle", "image": "packs/turtle.svg" },
+    { "id": "lizard", "label": "Lizard", "image": "packs/lizard.svg" },
+    { "id": "bird", "label": "Bird", "image": "packs/bird.png" },
+    { "id": "ferret", "label": "Ferret", "image": "packs/ferret.svg" },
+    { "id": "rabbit", "label": "Rabbit", "image": "packs/rabbit.png" }
+  ]
+}

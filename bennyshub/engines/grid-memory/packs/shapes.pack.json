@@ -1,0 +1,17 @@
+{
+  "id": "shapes",
+  "title": "Shapes & Colors",
+  "board": { "rows": 3, "cols": 4 },
+  "scanOrder": "linear",
+  "difficulty": "medium",
+  "timing": { "mismatchHideMs": 1500 },
+  "seed": 24,
+  "tiles": [
+    { "id": "circle", "label": "Red Circle" },
+    { "id": "square", "label": "Blue Square" },
+    { "id": "triangle", "label": "Green Triangle" },
+    { "id": "star", "label": "Yellow Star" },
+    { "id": "heart", "label": "Pink Heart" },
+    { "id": "diamond", "label": "Purple Diamond" }
+  ]
+}
