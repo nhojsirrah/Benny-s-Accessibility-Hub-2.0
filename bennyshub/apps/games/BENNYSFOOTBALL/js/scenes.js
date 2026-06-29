@@ -111,8 +111,10 @@ class TitleScene extends Phaser.Scene {
             this.menu.destroy();
             this.scene.start('SettingsScene');
         } else if (value === 'exit') {
-            // Signal the hub to close the iframe and return to the main menu.
-            // Same pattern used by Bowling and other hub games.
+            // Prefer the shared Nav back-contract (postMessage { action: 'closeApp' }
+            // when framed; Electron window close / history.back otherwise). Fall back
+            // to the legacy focusBackButton postMessage / location when Nav is absent.
+            if (window.Nav && window.Nav.goBack()) return;
             if (window.parent && window.parent !== window) {
                 window.parent.postMessage({ action: 'focusBackButton' }, '*');
             } else {

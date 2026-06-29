@@ -42,6 +42,43 @@ class ScanList {
         this.container.add(this.gfx);
         this.labels = [];
 
+        // --- Shared ScanController menu model -----------------------------------
+        // The MENU / settings (single-axis list) scanning is driven by the shared
+        // ScanController (shared/scan-core.js), used here as a movement + announce
+        // + select ENGINE only. It is intentionally NOT attached to the document:
+        // the same Space / Enter keys also drive the app-specific charging / aiming
+        // gameplay timing (see ScanInput below), which stays on its own path.
+        //   - getTargets exposes this list's live options.
+        //   - onFocus reuses the existing highlight (this.index + _draw()).
+        //   - onAnnounce reuses the existing scan beep + TTS announce.
+        //   - onSelect runs the focused option's onSelect callback.
+        // this.index stays the single source of truth the visuals read; next()/
+        // prev()/select() align the controller cursor to it before each move so
+        // pointer/hover and state-restore paths that set this.index directly are
+        // honored. autoScan stays OFF here — auto-scan keeps running on this list's
+        // own Phaser scene timer (_startTimer) so cadence/visibility stays
+        // scene-bound. No anti-tremor floor is set (minPressMs / minSelectMs /
+        // minIntervalMs default 0): this game never had a press-duration / interval
+        // input gate — its anti-tremor protection is the e.repeat ignore +
+        // awaitingSpaceRelease re-fire guard in ScanInput, retained as-is.
+        this.scan = (typeof window !== 'undefined' && window.ScanController)
+            ? new window.ScanController({
+                getTargets: () => this.options,
+                onFocus: (opt, index) => { this.index = index; this._draw(); },
+                onAnnounce: () => {
+                    if (this.audio) this.audio.play('scan');
+                    this._announceCurrent(false);
+                },
+                onSelect: (opt, index) => {
+                    if (this.onSelect) this.onSelect(opt, index);
+                },
+                wrap: true,
+                spaceHoldMs: 3000,
+                reverseCadenceMs: 2000,
+                autoScan: false,
+            })
+            : null;
+
         this._build();
         this._draw();
         // Start at index -1: nothing is highlighted or announced until the user
@@ -199,6 +236,17 @@ class ScanList {
 
     next(fromTimer) {
         if (!this.active) return;
+        if (this.scan) {
+            // Route movement + announce through the shared ScanController. Align
+            // its cursor to this.index first (pointer/hover and state-restore set
+            // this.index directly), then advance; onFocus/onAnnounce update the
+            // highlight + beep + TTS exactly as the fallback below does.
+            this.scan.setIndex(this.index);
+            this.scan.advance();
+            if (!fromTimer) this._startTimer(); // reset timer on manual advance
+            return;
+        }
+        // Fallback (shared ScanController not loaded): original behavior.
         this.index = this.index < 0 ? 0 : (this.index + 1) % this.options.length;
         this._draw();
         if (this.audio) this.audio.play('scan');
@@ -208,6 +256,13 @@ class ScanList {
 
     prev(fromTimer) {
         if (!this.active) return;
+        if (this.scan) {
+            this.scan.setIndex(this.index);
+            this.scan.back();
+            if (!fromTimer) this._startTimer();
+            return;
+        }
+        // Fallback (shared ScanController not loaded): original behavior.
         this.index = this.index < 0 ? this.options.length - 1 : (this.index - 1 + this.options.length) % this.options.length;
         this._draw();
         if (this.audio) this.audio.play('scan');
@@ -220,6 +275,15 @@ class ScanList {
         if (this.index < 0) return; // nothing highlighted yet — Enter does nothing
         const opt = this.options[this.index];
         if (this.audio) this.audio.play('select');
+        if (this.scan) {
+            // Delegate to the controller so selection flows through the same engine
+            // as movement; setIndex keeps its cursor aligned with this.index and its
+            // onSelect fires the cfg.onSelect callback (single fire).
+            this.scan.setIndex(this.index);
+            this.scan.select();
+            return;
+        }
+        // Fallback (shared ScanController not loaded): original behavior.
         if (this.onSelect) this.onSelect(opt, this.index);
     }
 
@@ -766,6 +830,18 @@ class ScanInput {
     _chargeStart() { if (this.h.chargeStart) this.h.chargeStart(); }
     _chargeRelease() { if (this.h.chargeRelease) this.h.chargeRelease(); }
     _isAim() { return !!(this.h.isAimPhase && this.h.isAimPhase()); }
+    // NumpadEnter parity: recognize the same SELECT keys the shared ScanController
+    // does (Enter + NumpadEnter), so a switch mapped to the numeric keypad's Enter
+    // behaves identically to the main Enter. This widens key RECOGNITION only — the
+    // hold-to-charge / select TIMING below is unchanged and stays app-bound. Falls
+    // back to a literal check when scan-core.js is absent.
+    _isSelectKey(e) {
+        const SC = (typeof window !== 'undefined') ? window.ScanController : null;
+        if (SC && SC.prototype && typeof SC.prototype.isSelect === 'function') {
+            return SC.prototype.isSelect.call(this, e);
+        }
+        return e.code === 'Enter' || e.code === 'NumpadEnter';
+    }
 
     _down(e) {
         if (e.repeat) return;
@@ -806,7 +882,7 @@ class ScanInput {
                 }, this._interval());
                 this.s.spaceTimer = null;
             }, this.longPress);
-        } else if (e.code === 'Enter') {
+        } else if (this._isSelectKey(e)) {
             e.preventDefault();
             if (this.s.enterDown) return;
             this.s.enterDown = true; this.s.enterLong = false;
@@ -841,7 +917,7 @@ class ScanInput {
             else if (wasShortNav && this.h.forward) this.h.forward();
             return;
         }
-        if (e.code === 'Enter' && this.s.enterDown) {
+        if (this._isSelectKey(e) && this.s.enterDown) {
             e.preventDefault();
             this.s.enterDown = false;
             if (this._isCharge()) this._chargeRelease();
@@ -859,4 +935,10 @@ class ScanInput {
         if (this.s.spaceTimer) clearTimeout(this.s.spaceTimer);
         if (this.s.backTimer) clearInterval(this.s.backTimer);
     }
+}
+
+// CommonJS surface so the jsdom test harness can require() these classes. No-op
+// in the browser (module is undefined there); does not change runtime behavior.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { ScanList, PlayDiagram, ScanInput };
 }
