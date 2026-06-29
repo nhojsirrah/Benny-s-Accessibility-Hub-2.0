@@ -279,3 +279,178 @@ describe("cross-iframe propagation", () => {
     expect(cb).not.toHaveBeenCalled();
   });
 });
+
+// ---- profiles (IP-7) -----------------------------------------------------
+
+describe("profiles: active profile + namespacing", () => {
+  test("defaults to the 'default' profile", () => {
+    expect(SettingsStore.getActiveProfile()).toBe("default");
+  });
+
+  test("default profile uses the LEGACY keys (back-compat, no migration)", () => {
+    SettingsStore.global.set("scanSpeedIndex", 2);
+    SettingsStore.app("tictactoe").set("p1Color", "Red");
+    // Exactly the pre-IP-7 keys — existing users' data is untouched.
+    expect(localStorage.getItem("narbe.settings.global")).toBeTruthy();
+    expect(localStorage.getItem("narbe.settings.tictactoe")).toBeTruthy();
+    expect(SettingsStore.activeKeyFor()).toBe("narbe.settings.global");
+    expect(SettingsStore.activeKeyFor("tictactoe")).toBe(
+      "narbe.settings.tictactoe",
+    );
+    // No profile-prefixed keys created for the default profile.
+    expect(localStorage.getItem("narbe.profile.default.settings.global")).toBe(
+      null,
+    );
+  });
+
+  test("setActiveProfile persists the id under narbe.activeProfile", () => {
+    SettingsStore.setActiveProfile("ben");
+    expect(SettingsStore.getActiveProfile()).toBe("ben");
+    expect(localStorage.getItem("narbe.activeProfile")).toBe("ben");
+  });
+
+  test("a non-default profile writes to narbe.profile.<p>.settings.* keys", () => {
+    SettingsStore.setActiveProfile("ben");
+    SettingsStore.global.set("scanSpeedIndex", 4);
+    SettingsStore.app("tictactoe").set("p1Color", "Cyan");
+
+    expect(SettingsStore.activeKeyFor()).toBe(
+      "narbe.profile.ben.settings.global",
+    );
+    const g = JSON.parse(
+      localStorage.getItem("narbe.profile.ben.settings.global"),
+    );
+    expect(g.scanSpeedIndex).toBe(4);
+    const a = JSON.parse(
+      localStorage.getItem("narbe.profile.ben.settings.tictactoe"),
+    );
+    expect(a.p1Color).toBe("Cyan");
+  });
+
+  test("PROFILE ISOLATION: no cross-profile data leak", () => {
+    // Seed the default profile.
+    SettingsStore.global.set("scanSpeedIndex", 1);
+    SettingsStore.app("tictactoe").set("themeIndex", 7);
+
+    // Switch to a new profile — it starts empty, default is invisible.
+    SettingsStore.setActiveProfile("ben");
+    expect(SettingsStore.global.get("scanSpeedIndex")).toBeUndefined();
+    expect(SettingsStore.app("tictactoe").get("themeIndex")).toBeUndefined();
+
+    // Write under the new profile.
+    SettingsStore.global.set("scanSpeedIndex", 9);
+    SettingsStore.app("tictactoe").set("themeIndex", 3);
+    expect(SettingsStore.global.get("scanSpeedIndex")).toBe(9);
+
+    // Switch back: the default profile's values are intact and unchanged.
+    SettingsStore.setActiveProfile("default");
+    expect(SettingsStore.global.get("scanSpeedIndex")).toBe(1);
+    expect(SettingsStore.app("tictactoe").get("themeIndex")).toBe(7);
+
+    // And the legacy default keys never absorbed the profile's values.
+    const dg = JSON.parse(localStorage.getItem("narbe.settings.global"));
+    expect(dg.scanSpeedIndex).toBe(1);
+  });
+
+  test("listProfiles returns 'default' first, then discovered profiles, de-duped", () => {
+    expect(SettingsStore.listProfiles()).toEqual(["default"]);
+
+    SettingsStore.setActiveProfile("ben");
+    SettingsStore.global.set("scanSpeedIndex", 2); // creates narbe.profile.ben.*
+    SettingsStore.app("tictactoe").set("themeIndex", 1); // another ben.* key
+
+    SettingsStore.setActiveProfile("mum");
+    SettingsStore.global.set("autoScan", true); // creates narbe.profile.mum.*
+
+    const profiles = SettingsStore.listProfiles();
+    expect(profiles[0]).toBe("default");
+    expect(profiles).toContain("ben");
+    expect(profiles).toContain("mum");
+    // Each id appears once despite multiple keys.
+    expect(profiles.filter((p) => p === "ben")).toHaveLength(1);
+  });
+
+  test("createProfile seeds an empty discoverable namespace", () => {
+    SettingsStore.createProfile("guest");
+    expect(SettingsStore.listProfiles()).toContain("guest");
+    // Seeded empty — the global namespace exists but holds no values.
+    const g = JSON.parse(
+      localStorage.getItem("narbe.profile.guest.settings.global"),
+    );
+    expect(g).toEqual({});
+  });
+
+  test("deleteProfile removes that profile's keys and never the default", () => {
+    SettingsStore.setActiveProfile("ben");
+    SettingsStore.global.set("scanSpeedIndex", 5);
+    SettingsStore.app("tictactoe").set("themeIndex", 2);
+    SettingsStore.setActiveProfile("default");
+    SettingsStore.global.set("scanSpeedIndex", 1);
+
+    const removed = SettingsStore.deleteProfile("ben");
+    expect(removed).toBeGreaterThan(0);
+    expect(localStorage.getItem("narbe.profile.ben.settings.global")).toBe(
+      null,
+    );
+    expect(localStorage.getItem("narbe.profile.ben.settings.tictactoe")).toBe(
+      null,
+    );
+    expect(SettingsStore.listProfiles()).not.toContain("ben");
+
+    // Default is untouched and protected.
+    expect(SettingsStore.deleteProfile("default")).toBe(0);
+    expect(SettingsStore.global.get("scanSpeedIndex")).toBe(1);
+  });
+
+  test("deleting the active profile falls back to default", () => {
+    SettingsStore.setActiveProfile("ben");
+    SettingsStore.global.set("scanSpeedIndex", 5);
+    SettingsStore.deleteProfile("ben");
+    expect(SettingsStore.getActiveProfile()).toBe("default");
+  });
+});
+
+describe("profiles: notify + broadcast", () => {
+  test("setActiveProfile notifies live subscribers so they re-read", () => {
+    const cb = jest.fn();
+    SettingsStore.global.subscribe(cb); // subscribed under the default store
+    SettingsStore.setActiveProfile("ben");
+    expect(cb).toHaveBeenCalled();
+  });
+
+  test("setActiveProfile broadcasts a narbe-profile-changed message to the parent", () => {
+    const post = jest.fn();
+    const realParent = Object.getOwnPropertyDescriptor(window, "parent");
+    Object.defineProperty(window, "parent", {
+      value: { postMessage: post },
+      configurable: true,
+    });
+    try {
+      SettingsStore.setActiveProfile("ben");
+      expect(post).toHaveBeenCalledTimes(1);
+      expect(post.mock.calls[0][0]).toEqual({
+        type: "narbe-profile-changed",
+        profile: "ben",
+      });
+    } finally {
+      if (realParent) Object.defineProperty(window, "parent", realParent);
+    }
+  });
+
+  test("an incoming narbe-profile-changed message switches the active profile", () => {
+    const cb = jest.fn();
+    SettingsStore.global.subscribe(cb);
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "narbe-profile-changed", profile: "remote" },
+      }),
+    );
+    expect(SettingsStore.getActiveProfile()).toBe("remote");
+    expect(cb).toHaveBeenCalled();
+    // Subsequent writes land in the remote profile's namespace.
+    SettingsStore.global.set("autoScan", true);
+    expect(
+      localStorage.getItem("narbe.profile.remote.settings.global"),
+    ).toBeTruthy();
+  });
+});

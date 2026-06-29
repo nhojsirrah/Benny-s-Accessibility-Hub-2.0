@@ -14,6 +14,22 @@
  *   global  -> "narbe.settings.global"
  *   per-app -> "narbe.settings.<appId>"
  *
+ * Profiles (IP-7):
+ *   A profile namespaces every settings key so multiple users of the same
+ *   machine keep separate setups. The active profile id lives under
+ *   "narbe.activeProfile" and defaults to "default".
+ *
+ *   Back-compat is the load-bearing rule: when the active profile is "default"
+ *   the keys are UNCHANGED from the above ("narbe.settings.global" /
+ *   "narbe.settings.<appId>"), so existing users' data IS the default profile
+ *   with no migration. For any other profile `p` the keys are prefixed:
+ *     global  -> "narbe.profile.<p>.settings.global"
+ *     per-app -> "narbe.profile.<p>.settings.<appId>"
+ *
+ *   `setActiveProfile` persists the new id, broadcasts a "narbe-profile-changed"
+ *   postMessage (mirroring the settings broadcast), and re-notifies live stores
+ *   so subscribers re-read through the now-active namespace.
+ *
  * Schema:
  *   GlobalSettings is a fixed, typed contract. Per-app schemas EXTEND the
  *   global schema (they add app-specific keys) and never redefine global keys.
@@ -43,6 +59,24 @@
   const GLOBAL_KEY = KEY_PREFIX + "global";
   const MIGRATED_KEY = KEY_PREFIX + "_migrated"; // array of completed migration ids
   const MESSAGE_TYPE = "narbe-settings-changed"; // mirrors scan-manager's message shape
+
+  // --- Profiles (IP-7) ----------------------------------------------------
+
+  const DEFAULT_PROFILE = "default";
+  const ACTIVE_PROFILE_KEY = "narbe.activeProfile"; // persisted active profile id
+  const PROFILE_PREFIX = "narbe.profile."; // namespace root for non-default profiles
+  const PROFILE_MESSAGE_TYPE = "narbe-profile-changed"; // mirrors MESSAGE_TYPE shape
+
+  /**
+   * Namespace a base "narbe.*" storage key for a profile.
+   *   default -> base key UNCHANGED (back-compat; existing data == default profile)
+   *   p       -> "narbe.profile.<p>." + (base key with its leading "narbe." dropped)
+   * e.g. "narbe.settings.global" -> "narbe.profile.p.settings.global".
+   */
+  function namespaceKey(baseKey, profile) {
+    if (!profile || profile === DEFAULT_PROFILE) return baseKey;
+    return PROFILE_PREFIX + profile + "." + baseKey.slice("narbe.".length);
+  }
 
   // Canonical highlight-color palette (index-based, shared by the index-using
   // apps). String-color apps map their color name into this list, falling back
@@ -209,6 +243,21 @@
     }
   }
 
+  // --- Active-profile state ----------------------------------------------
+
+  /** Read the persisted active profile id (a plain string), or the default. */
+  function readActiveProfile() {
+    try {
+      const raw = localStorage.getItem(ACTIVE_PROFILE_KEY);
+      return typeof raw === "string" && raw ? raw : DEFAULT_PROFILE;
+    } catch (e) {
+      return DEFAULT_PROFILE;
+    }
+  }
+
+  let activeProfile =
+    typeof localStorage !== "undefined" ? readActiveProfile() : DEFAULT_PROFILE;
+
   // --- Cross-iframe broadcast (mirrors scan-manager) ----------------------
 
   // Registry of live store instances by their storage key, so the single
@@ -235,11 +284,34 @@
     }
   }
 
+  /**
+   * Broadcast a profile switch to other frames. Same parent-only loop guard as
+   * `broadcast` above. The receiver applies it WITHOUT re-broadcasting.
+   */
+  function broadcastProfileChange(profileId) {
+    if (!hasWindow) return;
+    const message = { type: PROFILE_MESSAGE_TYPE, profile: profileId };
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage(message, "*");
+      }
+    } catch (e) {
+      console.warn("SettingsStore: profile broadcast failed:", e);
+    }
+  }
+
   if (hasWindow) {
     // Same-window-tree sync via postMessage (the simulated path in tests).
     window.addEventListener("message", function (event) {
       const data = event && event.data;
-      if (!data || data.type !== MESSAGE_TYPE) return;
+      if (!data) return;
+      if (data.type === PROFILE_MESSAGE_TYPE) {
+        if (typeof data.profile === "string" && data.profile) {
+          switchProfile(data.profile, false); // receive path: do not re-broadcast
+        }
+        return;
+      }
+      if (data.type !== MESSAGE_TYPE) return;
       const store = registry.get(data.key);
       if (!store) return;
       if (data.settings && typeof data.settings === "object") {
@@ -329,6 +401,15 @@
         notify();
       },
 
+      /**
+       * Fire subscribers without a value change, used on a profile switch so
+       * consumers re-read through `SettingsStore.global` / `.app()` (which now
+       * resolve to the newly-active namespace).
+       */
+      _notifyProfileChange: function () {
+        notify();
+      },
+
       /** Apply an incoming remote snapshot, persist it, notify. No re-broadcast. */
       _receiveRemote: function (settings) {
         const next = Object.assign({}, cache);
@@ -369,12 +450,22 @@
 
   // --- Singletons ---------------------------------------------------------
 
-  let globalStore = null;
-  const appStores = new Map();
+  // Stores are cached by their (profile-resolved) storage key. `registry` is
+  // already that map — createStore registers each store under its storage key —
+  // so we reuse it as the cache instead of keeping a second index. This makes a
+  // profile switch a no-op for already-built stores: the same id resolves to a
+  // different key, which creates/returns a different store.
+  function getOrCreateStore(storageKey, schema) {
+    const existing = registry.get(storageKey);
+    if (existing) return existing;
+    return createStore(storageKey, schema); // self-registers in `registry`
+  }
 
   function getGlobal() {
-    if (!globalStore) globalStore = createStore(GLOBAL_KEY, GLOBAL_SCHEMA);
-    return globalStore;
+    return getOrCreateStore(
+      namespaceKey(GLOBAL_KEY, activeProfile),
+      GLOBAL_SCHEMA,
+    );
   }
 
   function getApp(appId) {
@@ -383,13 +474,131 @@
         "SettingsStore.app(appId): appId must be a non-empty string",
       );
     }
-    if (!appStores.has(appId)) {
-      appStores.set(
-        appId,
-        createStore(KEY_PREFIX + appId, schemaForApp(appId)),
+    return getOrCreateStore(
+      namespaceKey(KEY_PREFIX + appId, activeProfile),
+      schemaForApp(appId),
+    );
+  }
+
+  // --- Profile management (IP-7) -----------------------------------------
+
+  /** The active profile id; "default" when unset. */
+  function getActiveProfile() {
+    return activeProfile;
+  }
+
+  /**
+   * Switch the active profile. Persists the id, re-notifies live stores so
+   * subscribers re-read through the new namespace, and broadcasts a
+   * "narbe-profile-changed" message to sibling frames. Subsequent get/set go
+   * to the new namespace. No-op (besides validation) when already active.
+   */
+  function setActiveProfile(id) {
+    if (typeof id !== "string" || !id) {
+      throw new Error(
+        "SettingsStore.setActiveProfile(id): id must be a non-empty string",
       );
     }
-    return appStores.get(appId);
+    switchProfile(id, true);
+  }
+
+  /**
+   * Core profile switch. `doBroadcast` is false on the receive path (an incoming
+   * "narbe-profile-changed" message) so siblings don't re-broadcast into a loop —
+   * the same loop guard the settings receiver uses.
+   */
+  function switchProfile(id, doBroadcast) {
+    if (id === activeProfile) return;
+    activeProfile = id;
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(ACTIVE_PROFILE_KEY, id);
+      } catch (e) {
+        console.error("SettingsStore: failed to persist active profile:", e);
+      }
+    }
+    // Re-notify every live store so consumers re-read via the active namespace.
+    registry.forEach(function (store) {
+      if (store && typeof store._notifyProfileChange === "function") {
+        store._notifyProfileChange();
+      }
+    });
+    if (doBroadcast) broadcastProfileChange(id);
+  }
+
+  /**
+   * Discover known profiles: "default" first, then every `<id>` that has at
+   * least one "narbe.profile.<id>." key in localStorage. De-duped.
+   */
+  function listProfiles() {
+    const ids = [DEFAULT_PROFILE];
+    if (typeof localStorage === "undefined") return ids;
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (typeof k !== "string" || k.indexOf(PROFILE_PREFIX) !== 0) continue;
+        const rest = k.slice(PROFILE_PREFIX.length);
+        const dot = rest.indexOf(".");
+        if (dot <= 0) continue;
+        const id = rest.slice(0, dot);
+        if (id && ids.indexOf(id) === -1) ids.push(id);
+      }
+    } catch (e) {
+      console.warn("SettingsStore: listProfiles scan failed:", e);
+    }
+    return ids;
+  }
+
+  /**
+   * Create a profile by seeding an empty global-settings namespace for it, so
+   * it is discoverable by listProfiles(). No-op for the default profile (it is
+   * always present). Returns the id.
+   */
+  function createProfile(id) {
+    if (typeof id !== "string" || !id) {
+      throw new Error(
+        "SettingsStore.createProfile(id): id must be a non-empty string",
+      );
+    }
+    if (id === DEFAULT_PROFILE) return id;
+    const key = namespaceKey(GLOBAL_KEY, id);
+    if (
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem(key) === null
+    ) {
+      writeRaw(key, {});
+    }
+    return id;
+  }
+
+  /**
+   * Delete a profile: remove every "narbe.profile.<id>." key. Never deletes the
+   * default profile. If the deleted profile is active, falls back to default.
+   * Returns the number of keys removed.
+   */
+  function deleteProfile(id) {
+    if (id === DEFAULT_PROFILE || typeof id !== "string" || !id) return 0;
+    if (typeof localStorage === "undefined") return 0;
+    const prefix = PROFILE_PREFIX + id + ".";
+    const toRemove = [];
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (typeof k === "string" && k.indexOf(prefix) === 0) toRemove.push(k);
+      }
+    } catch (e) {
+      console.warn("SettingsStore: deleteProfile scan failed:", e);
+    }
+    toRemove.forEach(function (k) {
+      try {
+        localStorage.removeItem(k);
+        registry.delete(k); // drop any cached store bound to a removed key
+      } catch (e) {
+        /* best-effort */
+      }
+    });
+    if (activeProfile === id) setActiveProfile(DEFAULT_PROFILE);
+    return toRemove.length;
   }
 
   // --- Migrations ---------------------------------------------------------
@@ -637,6 +846,13 @@
     runMigrations: runMigrations,
     migrations: migrations,
 
+    // Profiles (IP-7).
+    getActiveProfile: getActiveProfile,
+    setActiveProfile: setActiveProfile,
+    listProfiles: listProfiles,
+    createProfile: createProfile,
+    deleteProfile: deleteProfile,
+
     // Exposed for callers/tests that need the canonical reference data.
     GLOBAL_SCHEMA: GLOBAL_SCHEMA,
     APP_SCHEMAS: APP_SCHEMAS,
@@ -644,13 +860,24 @@
     keyFor: function (appId) {
       return appId ? KEY_PREFIX + appId : GLOBAL_KEY;
     },
+    /**
+     * The active-profile-resolved storage key for the global store (no appId)
+     * or a per-app store. Lets the hub/tests confirm where writes land.
+     */
+    activeKeyFor: function (appId) {
+      const base = appId ? KEY_PREFIX + appId : GLOBAL_KEY;
+      return namespaceKey(base, activeProfile);
+    },
 
-    // Test/lifecycle helper: drop in-memory singletons so a fresh localStorage
-    // (e.g. between tests) is re-read cleanly. Does not touch storage.
+    // Test/lifecycle helper: drop in-memory store instances and re-read the
+    // active profile so a fresh localStorage (e.g. between tests) is re-read
+    // cleanly. Does not touch storage.
     _reset: function () {
-      globalStore = null;
-      appStores.clear();
       registry.clear();
+      activeProfile =
+        typeof localStorage !== "undefined"
+          ? readActiveProfile()
+          : DEFAULT_PROFILE;
     },
   };
 
