@@ -24,19 +24,58 @@
     highlightColor: "yellow"
   };
 
+  // Journal's per-app settings live in the shared SettingsStore (appId
+  // "journal"). The legacy "journal_settings" blob is converted on first read
+  // by SettingsStore's "journal_settings" migration. Only `theme` rides the
+  // shared store: journal's highlight palette (yellow/pink/green/orange/black/
+  // white/purple/red) is NOT the canonical HIGHLIGHT_COLORS set, so
+  // highlightColor is kept in the legacy blob to stay byte-for-byte
+  // behaviour-preserving (the same "keep the local palette" call WordJumble made).
+  const JOURNAL_APP_ID = "journal";
+  function journalStore() {
+    return (
+      typeof window !== "undefined" &&
+      window.SettingsStore &&
+      window.SettingsStore.app(JOURNAL_APP_ID)
+    );
+  }
+  function readLegacySettings() {
+    try {
+      return JSON.parse(localStorage.getItem("journal_settings")) || {};
+    } catch {
+      return {};
+    }
+  }
+
   let settings = loadSettings();
   function loadSettings() {
     try {
-      const v = JSON.parse(localStorage.getItem("journal_settings"));
-      // Filter out old settings keys if they exist
-      const { scanSpeed, autoScan, ...valid } = v || {}; 
-      return { ...defaultSettings, ...valid };
+      if (typeof window !== "undefined" && window.SettingsStore) {
+        window.SettingsStore.runMigrations();
+      }
+      const store = journalStore();
+      const legacy = readLegacySettings();
+      const theme =
+        (store && store.get("theme")) || legacy.theme || defaultSettings.theme;
+      // highlightColor stays local (non-canonical palette - see note above).
+      const highlightColor =
+        legacy.highlightColor || defaultSettings.highlightColor;
+      return { theme, highlightColor };
     } catch {
       return { ...defaultSettings };
     }
   }
   function saveSettings() {
-    localStorage.setItem("journal_settings", JSON.stringify(settings));
+    const store = journalStore();
+    if (store) {
+      store.set("theme", settings.theme);
+    }
+    // Keep highlightColor (and a theme mirror for one-release rollback) in the
+    // legacy blob; highlightColor is kept local by design (see note above).
+    const legacy = readLegacySettings();
+    legacy.theme = settings.theme;
+    legacy.highlightColor = settings.highlightColor;
+    localStorage.setItem("journal_settings", JSON.stringify(legacy));
   }
 
   // Theme management
@@ -61,6 +100,66 @@
     settings.highlightColor = color;
     saveSettings();
     updateDisplays();
+  }
+
+  // --- Prediction engine (shared Predict module) -------------------------
+  // Journal used to ship its own copy of the keyboard n-gram engine
+  // (predictions.js). It now runs on the shared Predict engine, exactly like
+  // the keyboard tool, so ranking lives in one place. The predictions provider
+  // loads the same base corpus the old copy used (Electron keyboard API, else
+  // the bundled /shared/predictive_ngrams.json).
+  function buildPredictionsProvider() {
+    const isElectron = typeof window !== "undefined" && window.electronAPI;
+    return {
+      async getPredictions() {
+        try {
+          if (isElectron && window.electronAPI.keyboard) {
+            return await window.electronAPI.keyboard.getPredictions();
+          }
+          const res = await fetch("/shared/predictive_ngrams.json");
+          if (res.ok) return await res.json();
+        } catch (e) {
+          console.error("Error loading predictions:", e);
+        }
+        return null;
+      },
+      async savePrediction(data) {
+        try {
+          if (isElectron && window.electronAPI.keyboard) {
+            return window.electronAPI.keyboard.savePrediction(data);
+          }
+          await fetch("/api/save_prediction", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
+        } catch (e) {
+          console.error("Error saving prediction:", e);
+        }
+      },
+      async saveNgram(data) {
+        try {
+          if (isElectron && window.electronAPI.keyboard) {
+            return window.electronAPI.keyboard.saveNgram(data);
+          }
+          await fetch("/api/save_ngram", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
+        } catch (e) {
+          console.error("Error saving n-gram:", e);
+        }
+      },
+    };
+  }
+
+  if (window.Predict && !window.predictionSystem) {
+    window.predictionSystem = window.Predict.create({
+      predictions: buildPredictionsProvider(),
+    });
+    // Load base data; sets dataLoaded = true.
+    window.predictionSystem.load();
   }
 
   // Scan timing & Manager Integration
@@ -1378,13 +1477,13 @@
 
   // Close app (Return to Hub)
   function closeApp() {
-    // Send message to parent window (Hub) to close the iframe
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage({ action: 'closeApp' }, '*');
-    } else {
-      // Fallback if not in iframe (e.g. testing directly)
-      window.location.href = "../../../index.html";
+    // Leave the app via the shared Nav contract (postMessage {action:'closeApp'}
+    // to the hub when framed). Falls back to the local index when standalone.
+    if (window.parent && window.parent !== window && window.Nav) {
+      if (window.Nav.goBack()) return;
     }
+    // Fallback if not in iframe (e.g. testing directly)
+    window.location.href = "../../../index.html";
   }
 
   // ========== INITIALIZATION ==========
