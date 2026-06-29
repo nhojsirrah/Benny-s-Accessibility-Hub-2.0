@@ -65,6 +65,21 @@ let scan = null;
 // resuming returns the highlight to that cell (matches the pre-migration behavior).
 let pausedGameCell = 0;
 
+// Shared <benny-pause-overlay> instance for the MAIN pause menu. Stays null when
+// window.BennyPauseOverlay is unavailable (the game then falls back to the bespoke
+// #pause-overlay markup). Built lazily the first time the menu is shown.
+let pauseOverlay = null;
+
+// True while the shared overlay is driving the MAIN pause menu (vs the bespoke
+// fallback markup or the pause-settings submenu, which still use #pause-overlay).
+function sharedPauseActive() {
+  return !!(
+    pauseOverlay &&
+    pauseOverlay.isOpen() &&
+    state.pauseMenuState === "main"
+  );
+}
+
 const settings = {
   themeIndex: 0,
   tts: true,
@@ -268,6 +283,8 @@ function getScanTargets() {
     }
     return cells;
   } else if (state.mode === "pause") {
+    // Main pause menu: when the shared overlay owns it, scan its action buttons.
+    if (sharedPauseActive()) return pauseOverlay.getTargets();
     const items =
       state.pauseMenuState === "settings" ? menus.pauseSettings : menus.pause;
     return items
@@ -312,6 +329,13 @@ function onScanSelect(target, index) {
     const cellIndex = cellIndexOf(target);
     if (cellIndex >= 0) playerMove(cellIndex);
   } else if (state.mode === "pause") {
+    // Main pause menu via the shared overlay: let it run the selected action
+    // (which is wired to the same menus.pause handler).
+    if (sharedPauseActive()) {
+      const t = target || pauseOverlay.getTargets()[index];
+      if (t) pauseOverlay.activate(t);
+      return;
+    }
     const items =
       state.pauseMenuState === "settings" ? menus.pauseSettings : menus.pause;
     const item = items[index];
@@ -597,6 +621,7 @@ function showMainMenu() {
 
   document.getElementById("menu-container").style.display = "flex";
   document.getElementById("game-container-inner").style.display = "none";
+  if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
   document.getElementById("pause-overlay").style.display = "none";
 
   const pBtn = document.getElementById("pause-button");
@@ -618,6 +643,47 @@ function showSettingsMenu() {
   if (scan) scan.start();
 }
 
+// Build the shared overlay's action list from menus.pause so the labels and
+// handlers stay verbatim (Continue Game / Settings / Return to Menu / Exit).
+function pauseOverlayActions() {
+  return menus.pause.map((item, i) => ({
+    id: String(i),
+    label: typeof item.text === "function" ? item.text() : item.text,
+    onSelect: () => {
+      if (item.action) item.action();
+    },
+  }));
+}
+
+// Show the MAIN pause menu through the shared <benny-pause-overlay>. The game's
+// ScanController still drives stepping/selection (getScanTargets routes at the
+// overlay's buttons while it is open); the overlay only supplies the targets and
+// runs activate(). Falls back to the bespoke markup via showPauseMenu's guard.
+function showSharedPauseOverlay() {
+  // Keep the bespoke overlay element hidden so only one pause UI is on screen.
+  const legacy = document.getElementById("pause-overlay");
+  if (legacy) {
+    legacy.style.display = "none";
+    legacy.innerHTML = "";
+  }
+
+  if (!pauseOverlay) {
+    pauseOverlay = window.BennyPauseOverlay.create({
+      actions: pauseOverlayActions(),
+      scanManager: window.NarbeScanManager,
+      voice: window.NarbeVoiceManager,
+    });
+  } else {
+    pauseOverlay.setActions(pauseOverlayActions());
+  }
+
+  pauseOverlay.show();
+  seatScanForMode();
+  updateHighlights();
+  speak("Paused. Continue Game");
+  if (scan) scan.start();
+}
+
 function showPauseMenu() {
   // Remember where the player was scanning so resume can return there.
   if (state.mode === "game" && scan) {
@@ -627,6 +693,12 @@ function showPauseMenu() {
 
   state.mode = "pause";
   state.pauseMenuState = "main"; // default pause menu
+
+  // Prefer the shared overlay; fall back to the bespoke markup when it is absent.
+  if (window.BennyPauseOverlay) {
+    showSharedPauseOverlay();
+    return;
+  }
 
   const overlay = document.getElementById("pause-overlay");
   overlay.style.display = "flex";
@@ -641,6 +713,11 @@ function showPauseMenu() {
 
 function showPauseSettings() {
   state.pauseMenuState = "settings";
+  // The settings submenu is not covered by the shared overlay contract; render it
+  // into the bespoke #pause-overlay and hand the screen back from the shared one.
+  if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
+  const overlay = document.getElementById("pause-overlay");
+  if (overlay) overlay.style.display = "flex";
   seatScanForMode();
   renderMenu("pause-overlay", menus.pauseSettings, "SETTINGS");
   announceCurrentPauseItem();
@@ -845,6 +922,7 @@ function startGame(mode) {
 
   document.getElementById("menu-container").style.display = "none";
   document.getElementById("game-container-inner").style.display = "flex";
+  if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
   document.getElementById("pause-overlay").style.display = "none";
 
   seatScanForMode();
@@ -869,6 +947,7 @@ function restartGame() {
 
 function resumeGame() {
   state.mode = "game";
+  if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
   document.getElementById("pause-overlay").style.display = "none";
   // Return the highlight to the cell the player was scanning before pausing.
   if (scan) {
@@ -1156,6 +1235,8 @@ if (typeof module !== "undefined" && module.exports) {
     getHighlightColor,
     loadSettings,
     saveSettings,
+    showPauseSettings,
     getScan: () => scan,
+    getPauseOverlay: () => pauseOverlay,
   };
 }
