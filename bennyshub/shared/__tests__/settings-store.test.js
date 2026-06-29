@@ -78,6 +78,140 @@ describe("schema validation", () => {
   });
 });
 
+// ---- deferred-app schemas (per-app schemas for apps that deferred adoption) --
+
+describe("deferred-app schemas extend globals without redefining them", () => {
+  // A representative valid blob per newly-added schema. Each mixes inherited
+  // global keys with the app's own keys to prove both are accepted on the store.
+  const validBlobs = {
+    triviamaster: { gamesSource: "Online" },
+    baseball: {
+      musicEnabled: true,
+      soundEnabled: false,
+      ttsEnabled: true,
+      voiceType: "default",
+      currentTrack: 2,
+    },
+    slotmachine: { themeIndex: 3, tts: false, sound: true },
+    football: {
+      musicEnabled: true,
+      soundEnabled: true,
+      easyThrow: false,
+      colorblind: "normal",
+    },
+    basketball: {
+      tts: true,
+      sfx: false,
+      music: true,
+      aimAssist: false,
+      scanSpeed: 2,
+      aimerSpeed: "slower",
+      aimerColor: "white",
+      ballTheme: "standard",
+      bgTheme: "arena",
+    },
+    dice: { sound: false },
+    chesscheckers: {
+      themeIndex: 1,
+      tts: false,
+      sound: true,
+      p1ColorIndex: 0,
+      p2ColorIndex: 1,
+      locationTTS: true,
+    },
+    battleboats: {
+      themeIndex: 2,
+      tts: true,
+      sound: false,
+      highlightStyleIndex: 1,
+    },
+    connectfour: {
+      themeIndex: 0,
+      tts: true,
+      sound: true,
+      p1ColorIndex: 0,
+      p2ColorIndex: 1,
+    },
+  };
+
+  test("each deferred app has a registered schema", () => {
+    Object.keys(validBlobs).forEach((appId) => {
+      expect(SettingsStore.APP_SCHEMAS[appId]).toBeDefined();
+    });
+  });
+
+  test("a valid app blob is accepted key-by-key", () => {
+    Object.keys(validBlobs).forEach((appId) => {
+      const store = SettingsStore.app(appId);
+      const blob = validBlobs[appId];
+      Object.keys(blob).forEach((key) => {
+        expect(store.set(key, blob[key])).toBe(true);
+        expect(store.get(key)).toBe(blob[key]);
+      });
+    });
+  });
+
+  test("an unknown key is rejected on a deferred app store", () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    expect(SettingsStore.app("baseball").set("definitelyNotAKey", 1)).toBe(
+      false,
+    );
+    expect(
+      SettingsStore.app("baseball").get("definitelyNotAKey"),
+    ).toBeUndefined();
+    warn.mockRestore();
+  });
+
+  test("a wrong-typed value is rejected on a deferred app store", () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    // currentTrack is a number; a string must be rejected.
+    expect(SettingsStore.app("baseball").set("currentTrack", "two")).toBe(
+      false,
+    );
+    // tts is a boolean; a number must be rejected.
+    expect(SettingsStore.app("slotmachine").set("tts", 1)).toBe(false);
+    warn.mockRestore();
+  });
+
+  test("schema EXTENDS globals: inherited global keys are accepted", () => {
+    // Global keys must work on every deferred app store (they extend, not clobber).
+    expect(SettingsStore.app("baseball").set("scanSpeedIndex", 2)).toBe(true);
+    expect(
+      SettingsStore.app("triviamaster").set("highlightStyle", "full"),
+    ).toBe(true);
+    expect(SettingsStore.app("connectfour").set("autoScan", true)).toBe(true);
+  });
+
+  test("schema does NOT clobber global keys (global store rejects app keys)", () => {
+    const warn = jest.spyOn(console, "warn").mockImplementation(() => {});
+    // App-specific keys must NOT have leaked into the global schema.
+    expect(SettingsStore.global.set("gamesSource", "Online")).toBe(false);
+    expect(SettingsStore.global.set("aimAssist", true)).toBe(false);
+    expect(SettingsStore.global.set("highlightStyleIndex", 1)).toBe(false);
+    // And the global keys themselves keep their global definitions intact.
+    expect(SettingsStore.GLOBAL_SCHEMA.scanSpeedIndex).toBe("number");
+    expect(SettingsStore.GLOBAL_SCHEMA.highlightStyle).toEqual({
+      enum: ["outline", "full"],
+    });
+    warn.mockRestore();
+  });
+
+  test("TriviaMaster gamesSource slot exists so its accessor auto-upgrades", () => {
+    // The trivia app's schema-aware accessor activates the typed store as soon
+    // as APP_SCHEMAS.triviamaster has a `gamesSource` key (see TRIVIAMASTER).
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        SettingsStore.APP_SCHEMAS.triviamaster,
+        "gamesSource",
+      ),
+    ).toBe(true);
+    expect(SettingsStore.app("triviamaster").set("gamesSource", "Local")).toBe(
+      true,
+    );
+    expect(SettingsStore.app("triviamaster").get("gamesSource")).toBe("Local");
+  });
+});
+
 // ---- global vs per-app key separation ------------------------------------
 
 describe("global vs per-app separation", () => {

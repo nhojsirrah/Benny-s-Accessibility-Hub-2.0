@@ -175,6 +175,108 @@
     journal: {
       theme: "string",
     },
+
+    // --- Schemas for apps whose migrations DEFERRED routing their settings ---
+    // These apps kept their settings in app-local localStorage because no
+    // per-app schema existed yet. Defining the schemas here lets each app adopt
+    // `SettingsStore.app('<id>')` later. Each lists ONLY the residual,
+    // app-specific keys — global keys (scanSpeedIndex / autoScan /
+    // highlightColorIndex / highlightStyle / voiceName / rate / pitch / volume)
+    // are inherited from GLOBAL_SCHEMA and are never redefined here.
+    //
+    // No migrations are added for these (that is follow-up work); the schemas
+    // simply make the typed per-app store accept each app's keys.
+
+    // TriviaMaster: games-source filter ('ALL' | 'Local' | 'Online'), legacy
+    // key "trivia_games_source". Its schema-aware accessor
+    // (loadGamesSource/saveGamesSource) auto-routes through the typed store as
+    // soon as this `gamesSource` slot exists, so adding it activates adoption
+    // immediately (no app change needed).
+    triviamaster: {
+      gamesSource: "string",
+    },
+
+    // Baseball: AudioSystem settings blob (legacy key "bennyBaseball_audio").
+    // Season progress ("bennyBaseball_season") is nested game-state, not typed
+    // settings, so it is intentionally not represented here.
+    baseball: {
+      musicEnabled: "boolean",
+      soundEnabled: "boolean",
+      ttsEnabled: "boolean",
+      voiceType: "string",
+      currentTrack: "number",
+    },
+
+    // Slot machine: residue of "megaslots_settings_v2". highlightColorIndex /
+    // highlightStyle are globals (the app keeps its own highlight palette local
+    // by index, but the key names are inherited from GLOBAL_SCHEMA).
+    slotmachine: {
+      themeIndex: "number",
+      tts: "boolean",
+      sound: "boolean",
+    },
+
+    // Football: AudioSystem blob ("bennyFootball_audio") plus the standalone
+    // "bennyFootball_easyThrow" (boolean toggle) and "bennyFootball_colorblind"
+    // (mode string) settings keys.
+    football: {
+      musicEnabled: "boolean",
+      soundEnabled: "boolean",
+      easyThrow: "boolean",
+      colorblind: "string",
+    },
+
+    // Basketball shooter: GameSettings blob ("bennys_ball_settings"). autoScan
+    // is global; `scanSpeed` here is the app's own seconds value, distinct from
+    // the global `scanSpeedIndex`.
+    basketball: {
+      tts: "boolean",
+      sfx: "boolean",
+      music: "boolean",
+      aimAssist: "boolean",
+      scanSpeed: "number",
+      aimerSpeed: "string",
+      aimerColor: "string",
+      ballTheme: "string",
+      bgTheme: "string",
+    },
+
+    // Dice: a single app-local setting ("bennysdice_settings"); TTS/voice/scan
+    // ride the shared managers.
+    dice: {
+      sound: "boolean",
+    },
+
+    // Chess/Checkers: residue of "bennys_checkers_settings" (highlightColorIndex
+    // / autoScan / scanSpeedIndex / highlightStyle are globals).
+    chesscheckers: {
+      themeIndex: "number",
+      tts: "boolean",
+      sound: "boolean",
+      p1ColorIndex: "number",
+      p2ColorIndex: "number",
+      locationTTS: "boolean",
+    },
+
+    // Battleboats: residue of "battleBoatsSettings". highlightColorIndex /
+    // scanSpeedIndex are globals; `highlightStyleIndex` is the app's own indexed
+    // style and is distinct from the global `highlightStyle` enum.
+    battleboats: {
+      themeIndex: "number",
+      tts: "boolean",
+      sound: "boolean",
+      highlightStyleIndex: "number",
+    },
+
+    // Connect Four: residue of "bennys_connectfour_settings" (highlightColorIndex
+    // / autoScan / scanSpeedIndex / highlightStyle are globals).
+    connectfour: {
+      themeIndex: "number",
+      tts: "boolean",
+      sound: "boolean",
+      p1ColorIndex: "number",
+      p2ColorIndex: "number",
+    },
   };
 
   function schemaForApp(appId) {
