@@ -980,7 +980,9 @@
   <script src="shared/voice-manager.js"></script>
   <!-- Shared Scan Manager -->
   <script src="shared/scan-manager.js"></script>
-  
+  <!-- Shared Manifest Validator (load-time app-contract gate) -->
+  <script src="shared/manifest-validator.js"></script>
+
   <script>
     /**
      * NARBE Accessibility Hub
@@ -1039,6 +1041,35 @@
       return 2000;
     }
 
+    // Validate a manifest array at load time (fail-fast, but non-crashing).
+    // Invalid entries are logged and skipped so a single bad entry can't take
+    // down the hub; every valid entry launches exactly as before. If the
+    // validator isn't loaded the entries pass through unchanged (back-compat).
+    function validateManifestEntries(entries, label) {
+      if (!Array.isArray(entries)) return [];
+      const validator = window.ManifestValidator;
+      if (!validator || typeof validator.validate !== 'function') {
+        return entries;
+      }
+      // Aggregate pass first for a single greppable summary error.
+      if (typeof validator.validateAll === 'function') {
+        const summary = validator.validateAll(entries);
+        if (!summary.valid) {
+          console.error(`[Hub] ${label} failed manifest validation:`, summary.errors);
+        }
+      }
+      // Then skip/guard invalid entries individually.
+      return entries.filter((entry, i) => {
+        const result = validator.validate(entry);
+        if (!result.valid) {
+          const id = entry && entry.id ? entry.id : `index ${i}`;
+          console.error(`[Hub] Skipping invalid manifest entry '${id}' in ${label}:`, result.errors);
+          return false;
+        }
+        return true;
+      });
+    }
+
     // Load JSON data for apps
     async function loadAppsData() {
       try {
@@ -1047,19 +1078,22 @@
           fetch('apps/tools/tools.json'),
           fetch('apps/games/games.json')
         ]);
-        
+
         if (!toolsResponse.ok) {
           console.error('Failed to fetch tools.json:', toolsResponse.status);
         }
         if (!gamesResponse.ok) {
           console.error('Failed to fetch games.json:', gamesResponse.status);
         }
-        
+
         const toolsData = await toolsResponse.json();
         const gamesData = await gamesResponse.json();
-        
-        appsData.tools = toolsData.tools.sort((a, b) => a.title.localeCompare(b.title));
-        appsData.games = gamesData.games.sort((a, b) => a.title.localeCompare(b.title));
+
+        const validTools = validateManifestEntries(toolsData.tools, 'tools.json');
+        const validGames = validateManifestEntries(gamesData.games, 'games.json');
+
+        appsData.tools = validTools.sort((a, b) => a.title.localeCompare(b.title));
+        appsData.games = validGames.sort((a, b) => a.title.localeCompare(b.title));
         
         console.log('Apps data loaded:', appsData);
         console.log('Tools count:', appsData.tools.length);
@@ -1611,6 +1645,23 @@
     // Track if current iframe is a server app
     let currentServerApp = null;
 
+    // Lifecycle handshake: hand the running app its init payload. Additive over
+    // the existing voice/scan settings messages; apps that don't speak the
+    // handshake simply ignore it. Re-sendable when an app announces app:ready.
+    function sendAppInit() {
+      if (!appIframe || !appIframe.contentWindow) return;
+      try {
+        appIframe.contentWindow.postMessage({
+          type: 'app:init',
+          settings: settings,
+          theme: settings.bgTheme || 'default',
+          electron: !!window.electronAPI
+        }, '*');
+      } catch (e) {
+        console.log('Unable to send app:init to iframe:', e);
+      }
+    }
+
     // Show iframe with tool/game
     function showIframe(src, title, isServerApp = false) {
       currentServerApp = isServerApp ? src : null;
@@ -1643,6 +1694,9 @@
               settings: scanSettings
             }, '*');
           }
+
+          // Lifecycle handshake: send the app:init payload.
+          sendAppInit();
         } catch (e) {
           console.log('Unable to focus iframe content or send settings:', e);
         }
@@ -2339,7 +2393,38 @@
           closeIframe();
         }
       }
-      
+
+      // ---- Lifecycle handshake (additive over the legacy closeApp path) ----
+
+      // App finished mounting: (re)send its init payload so apps that attach
+      // their listener after our initial 500ms push still get settings/theme.
+      if (event.data.type === 'app:ready') {
+        if (iframeContainer.classList.contains('active')) {
+          sendAppInit();
+        }
+      }
+
+      // App wants the hub to display a title.
+      if (event.data.type === 'app:title' && typeof event.data.title === 'string') {
+        iframeTitle.textContent = event.data.title;
+      }
+
+      // App requests going back: do the existing close-to-menu flow.
+      if (event.data.type === 'app:requestBack') {
+        if (iframeContainer.classList.contains('active')) {
+          closeIframe();
+        }
+      }
+
+      // App requests a pause. The hub has no global pause concept, so we simply
+      // acknowledge; refocusing the back button keeps switch-access usable.
+      if (event.data.type === 'app:requestPause') {
+        if (iframeContainer.classList.contains('active')) {
+          console.log('[Hub] App requested pause');
+          iframeBack.focus();
+        }
+      }
+
       // Handle voice settings request from iframes
       if (event.data.type === 'narbe-voice-settings-request') {
         if (window.NarbeVoiceManager && event.source) {
