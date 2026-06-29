@@ -97,6 +97,14 @@ class ScanController {
       opts.reverseCadenceMs !== undefined ? opts.reverseCadenceMs : 2000;
     this.enterHoldMs = opts.enterHoldMs !== undefined ? opts.enterHoldMs : 5000;
 
+    // Optional debounce floors (ms): a Space/Enter tap SHORTER than this is
+    // ignored. For switch/AAC users this rejects accidental brief presses
+    // (tremor, spasticity). Default 0 = off => no behavior change for adopters
+    // that don't set it. minPressMs gates the Space short-press advance;
+    // minSelectMs gates the Enter short-press select.
+    this.minPressMs = opts.minPressMs !== undefined ? opts.minPressMs : 0;
+    this.minSelectMs = opts.minSelectMs !== undefined ? opts.minSelectMs : 0;
+
     // Injectable collaborators. Read these fields in logic — never the globals.
     this.scanManager =
       opts.scanManager !== undefined
@@ -258,8 +266,13 @@ class ScanController {
       const wasReverse = this._reverseStarted;
       this._spaceHeld = false;
       this._clearSpaceTimers();
-      // Short press that never tipped into reverse => advance once.
-      if (!wasReverse && duration < this.spaceHoldMs) {
+      // Short press that never tipped into reverse => advance once, unless it
+      // was shorter than the debounce floor (an accidental brief tap).
+      if (
+        !wasReverse &&
+        duration >= this.minPressMs &&
+        duration < this.spaceHoldMs
+      ) {
         this.advance();
       }
       this._reverseStarted = false;
@@ -272,8 +285,13 @@ class ScanController {
       const wasPause = this._pauseTriggered;
       this._enterHeld = false;
       this._clearEnterTimers();
-      // Short press that never triggered pause => select.
-      if (!wasPause && duration < this.enterHoldMs) {
+      // Short press that never triggered pause => select, unless it was shorter
+      // than the debounce floor (an accidental brief tap).
+      if (
+        !wasPause &&
+        duration >= this.minSelectMs &&
+        duration < this.enterHoldMs
+      ) {
         this.select();
       }
       this._pauseTriggered = false;

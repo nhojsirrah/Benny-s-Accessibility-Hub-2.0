@@ -27,10 +27,12 @@ function dispatchKey(type, code) {
   );
 }
 
-// Short press: keydown immediately followed by keyup (duration 0, under the hold
-// thresholds) -> advance (Space) or select (Enter / NumpadEnter).
+// Short press: keydown, a brief realistic hold (~300ms), then keyup. The duration
+// sits above the keyboard's restored debounce floors (Space 250ms / Enter 100ms)
+// but below the hold thresholds -> advance (Space) or select (Enter / NumpadEnter).
 function tap(code) {
   dispatchKey("keydown", code);
+  jest.advanceTimersByTime(300);
   dispatchKey("keyup", code);
 }
 

@@ -431,6 +431,8 @@
       spaceHoldMs: hold.longPress, // hold Space -> reverse scanning
       reverseCadenceMs: hold.backward, // reverse step cadence
       enterHoldMs: 3000, // hold Enter (>=3s) -> jump-to-predictive / back-out
+      minPressMs: 250, // legacy debounce: ignore Space taps < 250ms (old app.js L282)
+      minSelectMs: 100, // legacy debounce: ignore Enter taps < 100ms (old stopSelecting)
       wrap: true,
       autoScan: false, // auto-scan stays app-driven (local kb_settings.autoScan)
       getInterval: getScanInterval,
@@ -461,6 +463,8 @@
       onSelect: () => selectSettingsItem(),
       spaceHoldMs: hold.longPress,
       reverseCadenceMs: hold.backward,
+      minPressMs: 250, // legacy debounce parity with the keyboard scan
+      minSelectMs: 100,
       wrap: true,
       autoScan: false,
       getInterval: getScanInterval,
