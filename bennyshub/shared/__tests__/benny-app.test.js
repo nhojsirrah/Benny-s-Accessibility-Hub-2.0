@@ -280,3 +280,110 @@ describe("BennyGame pause/back overlay", () => {
     expect(focused.classList.contains("scan-focus")).toBe(true);
   });
 });
+
+describe("BennyApp lifecycle handshake", () => {
+  /** A stand-in for the embedding hub window. */
+  function makeHubMock() {
+    return { postMessage: jest.fn() };
+  }
+
+  test("mount() emits app:ready to the injected hub", () => {
+    const hub = makeHubMock();
+    const app = new BennyApp({ ScanController: makeStubController(), hub });
+
+    app.mount(document.body);
+
+    expect(hub.postMessage).toHaveBeenCalledWith({ type: "app:ready" }, "*");
+  });
+
+  test("emitTitle / requestBack / requestPause post the handshake messages", () => {
+    const hub = makeHubMock();
+    const app = new BennyApp({ ScanController: makeStubController(), hub });
+    app.mount(document.body);
+    hub.postMessage.mockClear(); // drop the app:ready from mount
+
+    app.emitTitle("Benny Says");
+    app.requestBack();
+    app.requestPause();
+
+    expect(hub.postMessage).toHaveBeenNthCalledWith(
+      1,
+      { type: "app:title", title: "Benny Says" },
+      "*",
+    );
+    expect(hub.postMessage).toHaveBeenNthCalledWith(
+      2,
+      { type: "app:requestBack" },
+      "*",
+    );
+    expect(hub.postMessage).toHaveBeenNthCalledWith(
+      3,
+      { type: "app:requestPause" },
+      "*",
+    );
+  });
+
+  test("handles app:init by applying settings, theme and electron flag", () => {
+    const hub = makeHubMock();
+    const onInit = jest.fn();
+    const app = new BennyApp({
+      ScanController: makeStubController(),
+      hub,
+      settings: { existing: true },
+    });
+    app.onInit = onInit;
+    app.mount(document.body);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: {
+          type: "app:init",
+          settings: { highlightColor: "blue" },
+          theme: "dark",
+          electron: true,
+        },
+      }),
+    );
+
+    // Existing settings are preserved and the new ones merged in.
+    expect(app.settings).toEqual({ existing: true, highlightColor: "blue" });
+    expect(app.theme).toBe("dark");
+    expect(app.electron).toBe(true);
+    expect(onInit).toHaveBeenCalledTimes(1);
+  });
+
+  test("ignores non-handshake messages (coexists with voice/scan settings)", () => {
+    const app = new BennyApp({
+      ScanController: makeStubController(),
+      hub: makeHubMock(),
+      theme: "light",
+    });
+    app.mount(document.body);
+
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        data: { type: "narbe-scan-settings-changed", settings: {} },
+      }),
+    );
+
+    // Unrelated messages must not clobber app state.
+    expect(app.theme).toBe("light");
+  });
+
+  test("teardown() stops listening for app:init", () => {
+    const onInit = jest.fn();
+    const app = new BennyApp({
+      ScanController: makeStubController(),
+      hub: makeHubMock(),
+    });
+    app.onInit = onInit;
+    app.mount(document.body);
+    app.teardown();
+
+    window.dispatchEvent(
+      new MessageEvent("message", { data: { type: "app:init", theme: "x" } }),
+    );
+
+    expect(onInit).not.toHaveBeenCalled();
+  });
+});

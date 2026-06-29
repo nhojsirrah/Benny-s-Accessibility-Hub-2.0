@@ -45,10 +45,18 @@
         options.ScanController ?? GLOBAL.ScanController;
       this.settings = options.settings ?? {};
       this.theme = options.theme ?? null;
+      this.electron = options.electron ?? null;
       this.root = null;
       this.scan = null;
       // Whether scanning wraps from the last target back to the first.
       this.wrap = true;
+
+      // Lifecycle handshake plumbing. `hub` is the postMessage target the app
+      // talks back to (the embedding hub window); injectable for tests. We
+      // listen for the hub's `app:init` on our own window via a bound handler so
+      // teardown() can remove exactly that listener.
+      this.hub = options.hub ?? GLOBAL.parent ?? GLOBAL;
+      this._onHubMessage = this._handleHubMessage.bind(this);
     }
 
     /**
@@ -66,7 +74,11 @@
       this.root = rootEl;
       this.scan = new this.ScanControllerClass(this._scanOptions());
       this.scan.attach(document);
+      this._listenForHub();
       this.onMount();
+      // Tell the embedding hub the app has finished mounting. Additive: a hub
+      // that doesn't speak the handshake simply ignores the message.
+      this.emitReady();
       return this;
     }
 
@@ -74,10 +86,105 @@
      * Tear down scanning and release resources.
      */
     teardown() {
+      this._stopListeningForHub();
       this.scan?.destroy?.();
       this.onTeardown();
       this.scan = null;
     }
+
+    // --- Lifecycle handshake (hub <-> app) --------------------------------
+
+    /**
+     * Post a message up to the embedding hub. No-op (swallowing errors) when no
+     * usable postMessage target is available, so standalone apps still work.
+     * @param {object} message
+     * @protected
+     */
+    _postToHub(message) {
+      const target = this.hub;
+      if (target && typeof target.postMessage === "function") {
+        try {
+          target.postMessage(message, "*");
+        } catch (e) {
+          /* standalone / cross-origin: ignore */
+        }
+      }
+    }
+
+    /** Announce to the hub that the app has mounted and is ready. */
+    emitReady() {
+      this._postToHub({ type: "app:ready" });
+    }
+
+    /**
+     * Ask the hub to display a title for the running app.
+     * @param {string} title
+     */
+    emitTitle(title) {
+      this._postToHub({ type: "app:title", title: String(title ?? "") });
+    }
+
+    /**
+     * Ask the hub to close this app and return to the menu. Mirrors the legacy
+     * `{ action: 'closeApp' }` path but uses the namespaced handshake message.
+     */
+    requestBack() {
+      this._postToHub({ type: "app:requestBack" });
+    }
+
+    /** Ask the hub to pause/suspend the running app. */
+    requestPause() {
+      this._postToHub({ type: "app:requestPause" });
+    }
+
+    /**
+     * Begin listening for hub -> app messages (currently `app:init`).
+     * @protected
+     */
+    _listenForHub() {
+      if (typeof GLOBAL.addEventListener === "function") {
+        GLOBAL.addEventListener("message", this._onHubMessage);
+      }
+    }
+
+    /** @protected */
+    _stopListeningForHub() {
+      if (typeof GLOBAL.removeEventListener === "function") {
+        GLOBAL.removeEventListener("message", this._onHubMessage);
+      }
+    }
+
+    /**
+     * Handle a hub -> app message. Applies `app:init` (settings / theme /
+     * electron flag) and forwards to the overridable onInit() hook. Other
+     * message shapes are ignored so this coexists with the existing voice/scan
+     * settings messages.
+     * @param {MessageEvent} event
+     * @protected
+     */
+    _handleHubMessage(event) {
+      const data = event && event.data;
+      if (!data || data.type !== "app:init") return;
+
+      if (data.settings && typeof data.settings === "object") {
+        this.settings = Object.assign({}, this.settings, data.settings);
+      }
+      if (Object.prototype.hasOwnProperty.call(data, "theme")) {
+        this.theme = data.theme;
+      }
+      if (Object.prototype.hasOwnProperty.call(data, "electron")) {
+        this.electron = data.electron;
+      }
+      this.onInit(data);
+    }
+
+    /**
+     * Called after an `app:init` payload has been applied. Overridable; default
+     * no-op. Subclasses use this to react to settings/theme handed down by the
+     * hub.
+     * @param {object} _payload
+     */
+    onInit(_payload) {}
 
     /**
      * Speak text through the injected voice manager (if available).
