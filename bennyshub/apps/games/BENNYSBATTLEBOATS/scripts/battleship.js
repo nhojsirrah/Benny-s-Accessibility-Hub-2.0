@@ -1504,34 +1504,52 @@ function hideGameOverModal() {
 // =========================================
 // PAUSE MODAL
 // =========================================
-function showPauseModal() {
-    // Don't show pause during defense phase (enemy's turn)
-    if (gamePhase === 'defense') return;
-    
-    // Don't show pause if modal is already visible
-    const modal = document.getElementById('pauseModal');
-    if (modal && modal.style.display === 'flex') return;
-    
-    stopAutoScan();
-    clearAllHighlights();
-    
-    if (modal) modal.style.display = 'flex';
-    
-    // Switch to pause scanning mode
-    scanState.mode = 'pause';
-    scanState.scanIndex = -1;
-    if (scan) scan.setIndex(-1);
-    updatePauseButtonsList();
-    
-    speak('Game paused. Continue, Settings, or Main Menu.');
-    startAutoScan();
+// --- Shared pause overlay (<benny-pause-overlay>) integration ---------------
+// The bespoke pause menu (the #pauseModal main view + its hand-rolled scan
+// handling) is retired in favour of the shared BennyPauseOverlay. When the
+// shared module is present we mount it once and route the app's ScanController
+// at it while it is open; when it is absent we fall back to the original
+// bespoke modal so the game still pauses. The settings sub-view
+// (#pauseSettingsView) is unchanged and continues to use the bespoke modal.
+let pauseOverlay = null;
+let pauseOverlayUnavailable = false;
+
+// The bespoke pause menu's actions, migrated verbatim. Each routes to its
+// existing handler so behaviour is preserved. 'resume' (Continue) auto-hides
+// via the overlay; Settings and Main Menu close it explicitly.
+function pauseOverlayActions() {
+    return [
+        { id: 'resume', label: 'Continue', onSelect: resumeFromPauseOverlay },
+        { id: 'settings', label: 'Settings', onSelect: openSettingsFromPauseOverlay },
+        { id: 'mainmenu', label: 'Main Menu', onSelect: mainMenuFromPauseOverlay },
+    ];
 }
 
-function hidePauseModal() {
-    const modal = document.getElementById('pauseModal');
-    if (modal) modal.style.display = 'none';
-    
-    // Return to previous mode
+// Lazily create and cache the shared overlay. Returns null (and remembers the
+// fact) when BennyPauseOverlay is unavailable, so callers fall back cleanly.
+function ensurePauseOverlay() {
+    if (pauseOverlay) return pauseOverlay;
+    if (pauseOverlayUnavailable) return null;
+    if (typeof window === 'undefined' || !window.BennyPauseOverlay ||
+        typeof window.BennyPauseOverlay.create !== 'function') {
+        pauseOverlayUnavailable = true;
+        return null;
+    }
+    pauseOverlay = window.BennyPauseOverlay.create({
+        actions: pauseOverlayActions(),
+        scanManager: window.NarbeScanManager,
+        voice: window.NarbeVoiceManager
+    });
+    return pauseOverlay;
+}
+
+function pauseOverlayActive() {
+    return !!(pauseOverlay && pauseOverlay.isOpen());
+}
+
+// Restore the scan context that was active before pausing. Shared by the
+// overlay's Resume action and the bespoke hidePauseModal fallback.
+function resumeGameAfterPause() {
     if (gameStarted) {
         scanState.mode = 'game-row';
         scanState.scanIndex = -1;
@@ -1545,6 +1563,74 @@ function hidePauseModal() {
         speak('Resuming. Scan buttons.');
     }
     startAutoScan();
+}
+
+// Overlay action handlers (Continue / Settings / Main Menu).
+function resumeFromPauseOverlay(event) {
+    // Hide explicitly first (preventing the overlay's own auto-hide) so the
+    // resume happens with the overlay already closed.
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+    if (pauseOverlay) pauseOverlay.hide();
+    resumeGameAfterPause();
+}
+
+function openSettingsFromPauseOverlay() {
+    // Settings opens the bespoke settings sub-view inside #pauseModal.
+    if (pauseOverlay) pauseOverlay.hide();
+    const modal = document.getElementById('pauseModal');
+    if (modal) modal.style.display = 'flex';
+    showSettingsFromPause();
+}
+
+function mainMenuFromPauseOverlay() {
+    if (pauseOverlay) pauseOverlay.hide();
+    returnToMainMenuFromPause();
+}
+
+function showPauseModal() {
+    // Don't show pause during defense phase (enemy's turn)
+    if (gamePhase === 'defense') return;
+
+    // Already paused (overlay open) — nothing to do.
+    if (pauseOverlayActive()) return;
+
+    // Prefer the shared overlay; fall back to the bespoke modal when absent.
+    if (ensurePauseOverlay()) {
+        stopAutoScan();
+        clearAllHighlights();
+        scanState.mode = 'pause';
+        scanState.scanIndex = -1;
+        if (scan) scan.setIndex(-1);
+        pauseOverlay.show(); // announces "Paused" and seats focus on Continue
+        startAutoScan();
+        return;
+    }
+
+    // --- Fallback: bespoke pause modal --------------------------------------
+    // Don't show pause if modal is already visible
+    const modal = document.getElementById('pauseModal');
+    if (modal && modal.style.display === 'flex') return;
+
+    stopAutoScan();
+    clearAllHighlights();
+
+    if (modal) modal.style.display = 'flex';
+
+    // Switch to pause scanning mode
+    scanState.mode = 'pause';
+    scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
+    updatePauseButtonsList();
+
+    speak('Game paused. Continue, Settings, or Main Menu.');
+    startAutoScan();
+}
+
+function hidePauseModal() {
+    const modal = document.getElementById('pauseModal');
+    if (modal) modal.style.display = 'none';
+
+    resumeGameAfterPause();
 }
 
 function showSettingsFromPause() {
@@ -1572,16 +1658,24 @@ function goBackToPauseMenu() {
     // Show main pause view
     const pauseMainView = document.getElementById('pauseMainView');
     const pauseSettingsView = document.getElementById('pauseSettingsView');
-    
+
     if (pauseMainView) pauseMainView.style.display = 'block';
     if (pauseSettingsView) pauseSettingsView.style.display = 'none';
-    
+
+    // With the shared overlay in play, hide the bespoke modal and re-open it.
+    if (ensurePauseOverlay()) {
+        const modal = document.getElementById('pauseModal');
+        if (modal) modal.style.display = 'none';
+        showPauseModal();
+        return;
+    }
+
     // Switch back to pause scanning mode
     scanState.mode = 'pause';
     scanState.scanIndex = -1;
     if (scan) scan.setIndex(-1);
     updatePauseButtonsList();
-    
+
     speak('Pause menu.');
     startAutoScan();
 }
@@ -2947,6 +3041,18 @@ function setupScan() {
     };
     document.addEventListener('keydown', bump, true);
     document.addEventListener('keyup', bump, true);
+
+    // While the shared pause overlay is open the ScanController owns Space /
+    // Enter / NumpadEnter; stop those keys from also reaching the overlay's own
+    // keydown handler (this listener is registered after the controller, so the
+    // controller still processes them at the document-capture phase first).
+    document.addEventListener('keydown', (e) => {
+        if (e.repeat) return;
+        if (pauseOverlayActive() &&
+            (e.code === 'Space' || e.code === 'Enter' || e.code === 'NumpadEnter')) {
+            e.stopPropagation();
+        }
+    }, true);
 }
 
 // (Re)start auto-scan, keeping the reverse cadence aligned with the current scan
@@ -3012,6 +3118,7 @@ function getGameCellTargets() {
 }
 
 function getScanTargets() {
+    if (pauseOverlayActive()) return pauseOverlay.getTargets();
     if (isScanBlocked()) return [];
     switch (scanState.mode) {
         case 'main-menu':      updateMainMenuButtonsList();      return scanState.mainMenuButtons;
@@ -3036,6 +3143,12 @@ function getScanTargets() {
 function onScanFocus(target, index) {
     playSound('scan');
     scanState.scanIndex = index;
+    if (pauseOverlayActive()) {
+        if (target && typeof target.focus === 'function') {
+            try { target.focus(); } catch (e) { /* not focusable: ignore */ }
+        }
+        return;
+    }
     if (target && (scanState.mode === 'row' || scanState.mode === 'game-row')) {
         scanState.rowIndex = target.row;
     }
@@ -3064,11 +3177,22 @@ function highlightCurrentMode() {
     }
 }
 
-function onScanAnnounce() {
+function onScanAnnounce(target) {
+    if (pauseOverlayActive()) {
+        const label = target && target.getAttribute
+            ? (target.getAttribute('aria-label') || target.textContent || '')
+            : '';
+        if (label) speak(label);
+        return;
+    }
     announceCurrentItem();
 }
 
-function onScanSelect() {
+function onScanSelect(target) {
+    if (pauseOverlayActive()) {
+        if (pauseOverlay) pauseOverlay.activate(target);
+        return;
+    }
     if (isScanBlocked()) return;
     // The controller index is authoritative; sync it into scanState so the
     // per-mode select* helpers (which read scanState.scanIndex) act on the
@@ -3274,6 +3398,10 @@ function handleEscapeKey() {
             returnToMainMenu();
             break;
         case 'pause':
+            if (pauseOverlayActive()) {
+                // The shared overlay owns Escape (Escape -> resume) itself.
+                break;
+            }
             hidePauseModal();
             break;
     }
@@ -3331,6 +3459,7 @@ if (typeof module !== 'undefined' && module.exports) {
         startGame,
         randomizeAllShips,
         getScan: () => scan,
+        getPauseOverlay: () => pauseOverlay,
         getDebug: () => ({
             ships, playerCells, enemyCells, enemyShips,
             player1, player2, gameMode, gamePhase, gameStarted,
