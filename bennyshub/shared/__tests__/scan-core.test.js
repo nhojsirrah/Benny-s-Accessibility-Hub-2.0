@@ -840,3 +840,86 @@ describe("Nested scanning: ascend / back", () => {
     });
   });
 });
+
+describe("Debounce floors (minPressMs / minSelectMs)", () => {
+  test("default (0): a zero-duration Space tap still advances (no regression)", () => {
+    const { controller } = buildController();
+    track(controller).attach();
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // duration 0
+    expect(controller.getIndex()).toBe(0);
+  });
+
+  test("minPressMs ignores a Space tap shorter than the floor", () => {
+    const { controller, onFocus } = buildController({
+      options: { minPressMs: 250 },
+    });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    jest.advanceTimersByTime(100); // < 250ms => accidental tap
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(-1); // no advance
+    expect(onFocus).not.toHaveBeenCalled();
+  });
+
+  test("minPressMs allows a Space tap at/above the floor", () => {
+    const { controller } = buildController({ options: { minPressMs: 250 } });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    jest.advanceTimersByTime(250); // == floor
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0); // advanced
+  });
+
+  test("minSelectMs ignores an Enter tap shorter than the floor", () => {
+    const { controller, onSelect } = buildController({
+      options: { minSelectMs: 100 },
+    });
+    track(controller).attach();
+    controller.focusIndex(0);
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(50); // < 100ms => accidental tap
+    dispatchKey("keyup", "Enter");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  test("minSelectMs allows an Enter tap at/above the floor", () => {
+    const { controller, onSelect } = buildController({
+      options: { minSelectMs: 100 },
+    });
+    track(controller).attach();
+    controller.focusIndex(0);
+
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(100); // == floor
+    dispatchKey("keyup", "Enter");
+    expect(onSelect).toHaveBeenCalledTimes(1);
+  });
+
+  test("debounce does not interfere with hold-to-reverse / hold-to-pause", () => {
+    const { controller, onPause } = buildController({
+      options: {
+        minPressMs: 250,
+        minSelectMs: 100,
+        spaceHoldMs: 3000,
+        enterHoldMs: 5000,
+      },
+    });
+    track(controller).attach();
+
+    // Hold Space past the reverse threshold -> reverse still works (not gated by minPressMs).
+    dispatchKey("keydown", "Space");
+    jest.advanceTimersByTime(3000);
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(2); // reverse landed on last
+
+    // Hold Enter past the pause threshold -> onPause still fires.
+    dispatchKey("keydown", "Enter");
+    jest.advanceTimersByTime(5000);
+    dispatchKey("keyup", "Enter");
+    expect(onPause).toHaveBeenCalled();
+  });
+});
