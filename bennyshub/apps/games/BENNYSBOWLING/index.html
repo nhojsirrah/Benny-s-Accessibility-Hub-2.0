@@ -19,6 +19,12 @@
 		<script src="../../../shared/voice-manager.js" onerror="console.error('Failed to load voice-manager.js')"></script>
 		<script src="../../../shared/ios-audio-fix.js"></script>
 		<script src="../../../shared/scan-manager.js"></script>
+		<!-- Shared single-switch scanning engine + nav/settings adoption.
+		     MENU/SETTINGS scanning is driven by ScanController; the 3D
+		     aiming/throw gameplay keeps its own untouched key path. -->
+		<script src="../../../shared/scan-core.js" onerror="console.error('Failed to load scan-core.js')"></script>
+		<script src="../../../shared/settings-store.js" onerror="console.error('Failed to load settings-store.js')"></script>
+		<script src="../../../shared/nav.js" onerror="console.error('Failed to load nav.js')"></script>
 		<script src="js/ammo.js"></script>
 		<script src="js/three.js"></script>
 		<script src="js/GLTFLoader.js"></script>
