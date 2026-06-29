@@ -15,8 +15,10 @@
     <div class="loader"></div>
     <h1>Launching Search Tool...</h1>
     <p>Please wait while the application starts.</p>
-    <button onclick="window.history.back()" style="margin-top:20px; padding:10px 20px; border:1px solid #333; background:transparent; color:#888; cursor:pointer;">Go Back</button>
+    <!-- Leave via the shared Nav contract (postMessage closeApp when framed); fall back to history.back() standalone. -->
+    <button onclick="if(!(window.Nav&&window.Nav.goBack()))window.history.back()" style="margin-top:20px; padding:10px 20px; border:1px solid #333; background:transparent; color:#888; cursor:pointer;">Go Back</button>
 
+    <script src="../../../shared/nav.js"></script>
     <script>
         fetch('/launch/search')
             .then(response => {
