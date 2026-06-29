@@ -105,6 +105,13 @@ class ScanController {
     this.minPressMs = opts.minPressMs !== undefined ? opts.minPressMs : 0;
     this.minSelectMs = opts.minSelectMs !== undefined ? opts.minSelectMs : 0;
 
+    // Optional anti-tremor rate limit (ms): ignore an accepted advance/select that
+    // lands LESS than this after the previous one. Unlike minPressMs (a per-press
+    // hold floor), this debounces by interval BETWEEN inputs. Default 0 = off.
+    this.minIntervalMs =
+      opts.minIntervalMs !== undefined ? opts.minIntervalMs : 0;
+    this._lastActionMs = -Infinity;
+
     // Injectable collaborators. Read these fields in logic — never the globals.
     this.scanManager =
       opts.scanManager !== undefined
@@ -271,7 +278,8 @@ class ScanController {
       if (
         !wasReverse &&
         duration >= this.minPressMs &&
-        duration < this.spaceHoldMs
+        duration < this.spaceHoldMs &&
+        this._rateOk()
       ) {
         this.advance();
       }
@@ -290,13 +298,24 @@ class ScanController {
       if (
         !wasPause &&
         duration >= this.minSelectMs &&
-        duration < this.enterHoldMs
+        duration < this.enterHoldMs &&
+        this._rateOk()
       ) {
         this.select();
       }
       this._pauseTriggered = false;
       return;
     }
+  }
+
+  // Anti-tremor rate limit: true (and records the timestamp) when at least
+  // minIntervalMs has elapsed since the last accepted action. With the default
+  // minIntervalMs of 0 this is always true, so it's a no-op unless configured.
+  _rateOk() {
+    const now = Date.now();
+    if (now - this._lastActionMs < this.minIntervalMs) return false;
+    this._lastActionMs = now;
+    return true;
   }
 
   _clearSpaceTimers() {
