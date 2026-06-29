@@ -701,6 +701,21 @@
     body.size-large .benny-hud-button{ font-size: 18px; padding: 14px 20px; }
     body.size-larger .benny-hud-button{ font-size: 22px; padding: 16px 24px; }
     body.size-largest .benny-hud-button{ font-size: 26px; padding: 20px 30px; }
+
+    /* IP-7 profile switcher — a small, scannable control group in the hub chrome
+       (next to the HUD). Styled to match the nav / HUD buttons. Hidden by
+       default; the inline script reveals it only when the SettingsStore profile
+       API is present, so without that API the hub looks/behaves exactly as today. */
+    .profile-switcher{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    #profile-switcher[hidden]{ display:none; }
+    .profile-current{
+      color: var(--muted); font-weight:700; font-size:14px;
+    }
+    body.size-large .profile-current{ font-size:18px; }
+    body.size-larger .profile-current{ font-size:22px; }
+    body.size-largest .profile-current{ font-size:28px; }
   </style>
 </head>
 <body>
@@ -745,6 +760,17 @@
            Wired in the inline script below (back -> hub close/return,
            pause/settings -> IP-4 handshake or hub settings screen). -->
       <benny-hud id="hub-hud" class="hub-hud" buttons="back pause settings"></benny-hud>
+
+      <!-- IP-7 multi-user profile switcher. Hidden until the inline script
+           confirms the SettingsStore profile API is loaded (graceful no-op
+           otherwise). Switch cycles SettingsStore.listProfiles(); New profile
+           is shown only when SettingsStore.createProfile exists. Its controls
+           are added to getFocusables() so they scan with the rest of the hub. -->
+      <div id="profile-switcher" class="profile-switcher" role="group" aria-label="User profile" hidden>
+        <span class="profile-current" id="profile-current" aria-live="polite">Profile: default</span>
+        <button class="nav-btn" id="profile-switch-btn" aria-label="Switch profile">Switch Profile</button>
+        <button class="nav-btn" id="profile-new-btn" aria-label="Create new profile">＋ New profile</button>
+      </div>
     </header>
 
     <main id="main" tabindex="-1">
@@ -1010,6 +1036,12 @@
   <script src="shared/hud.js"></script>
   <!-- Typed registry over the loaded games.json / tools.json manifests -->
   <script src="shared/hub-registry.js"></script>
+  <!-- Shared SettingsStore: typed, profile-namespaced settings (IP-6/IP-7).
+       Provides the profile API the switcher consumes; absent/old builds simply
+       leave the switcher hidden. -->
+  <script src="shared/settings-store.js"></script>
+  <!-- Pure helpers for the IP-7 profile switcher (no DOM; unit-tested). -->
+  <script src="shared/profile-switcher.js"></script>
 
   <script>
     /**
@@ -1032,6 +1064,10 @@
     const iframeTitle = document.getElementById('iframe-title');
     const appIframe = document.getElementById('app-iframe');
     const bennyHud = document.getElementById('hub-hud');
+    const profileSwitcher = document.getElementById('profile-switcher');
+    const profileCurrentEl = document.getElementById('profile-current');
+    const profileSwitchBtn = document.getElementById('profile-switch-btn');
+    const profileNewBtn = document.getElementById('profile-new-btn');
 
     // App data and state. The loaded manifests are modelled as a typed
     // registry (shared/hub-registry.js) rather than bare arrays; the launcher
@@ -1803,6 +1839,181 @@
       });
     }
 
+    // ---- Profile switcher (IP-7) ---------------------------------------------
+    // A household-friendly multi-user switcher in the hub chrome. It consumes the
+    // SettingsStore PROFILE CONTRACT v1 (getActiveProfile / setActiveProfile /
+    // listProfiles, optional createProfile). Every call is guarded so the hub
+    // still works — switcher simply hidden — if that API isn't loaded yet. The
+    // pure list/active/next resolution lives in shared/profile-switcher.js
+    // (window.ProfileSwitcher); inline fallbacks keep the hub correct even if
+    // that helper failed to load.
+
+    function getSettingsStore() {
+      return (typeof window !== 'undefined') ? window.SettingsStore : null;
+    }
+    function profileUtil() {
+      return (typeof window !== 'undefined') ? window.ProfileSwitcher : null;
+    }
+
+    // Is the full profile API present? (get + set + list)
+    function profileApiReady() {
+      const util = profileUtil();
+      const store = getSettingsStore();
+      if (util && typeof util.isProfileApiAvailable === 'function') {
+        return util.isProfileApiAvailable(store);
+      }
+      return !!(store
+        && typeof store.getActiveProfile === 'function'
+        && typeof store.setActiveProfile === 'function'
+        && typeof store.listProfiles === 'function');
+    }
+
+    function canCreateProfileSafe() {
+      const util = profileUtil();
+      const store = getSettingsStore();
+      if (util && typeof util.canCreateProfile === 'function') {
+        return util.canCreateProfile(store);
+      }
+      return !!(store && typeof store.createProfile === 'function');
+    }
+
+    function getActiveProfileSafe() {
+      const util = profileUtil();
+      const store = getSettingsStore();
+      if (util && typeof util.resolveActiveProfile === 'function') {
+        return util.resolveActiveProfile(store);
+      }
+      try {
+        const id = store && store.getActiveProfile && store.getActiveProfile();
+        return (typeof id === 'string' && id) ? id : 'default';
+      } catch (e) {
+        return 'default';
+      }
+    }
+
+    function getProfileListSafe() {
+      const util = profileUtil();
+      const store = getSettingsStore();
+      if (util && typeof util.resolveProfileList === 'function') {
+        return util.resolveProfileList(store);
+      }
+      const out = ['default'];
+      try {
+        if (store && store.listProfiles) {
+          const raw = store.listProfiles();
+          if (Array.isArray(raw)) {
+            raw.forEach((id) => {
+              if (typeof id === 'string' && id && out.indexOf(id) === -1) out.push(id);
+            });
+          }
+        }
+      } catch (e) { /* leave default-only */ }
+      return out;
+    }
+
+    // Show the switcher only when the API is ready; show "New profile" only when
+    // createProfile exists. Otherwise the hub chrome is unchanged.
+    function updateProfileSwitcherVisibility() {
+      if (!profileSwitcher) return;
+      const ready = profileApiReady();
+      profileSwitcher.hidden = !ready;
+      if (profileNewBtn) profileNewBtn.hidden = !(ready && canCreateProfileSafe());
+    }
+
+    function renderProfileSwitcher() {
+      if (!profileSwitcher) return;
+      updateProfileSwitcherVisibility();
+      if (profileSwitcher.hidden) return;
+      const active = getActiveProfileSafe();
+      if (profileCurrentEl) profileCurrentEl.textContent = `Profile: ${active}`;
+      if (profileSwitchBtn) {
+        profileSwitchBtn.setAttribute('aria-label', `Switch profile. Current profile ${active}`);
+        // Keep visible but inert when there's nothing else to switch to.
+        profileSwitchBtn.disabled = getProfileListSafe().length < 2;
+      }
+    }
+
+    function switchToNextProfile() {
+      if (!profileApiReady()) return;
+      const store = getSettingsStore();
+      const util = profileUtil();
+      const list = getProfileListSafe();
+      const active = getActiveProfileSafe();
+      const next = (util && typeof util.nextProfile === 'function')
+        ? util.nextProfile(list, active)
+        : list[(Math.max(0, list.indexOf(active)) + 1) % list.length];
+      if (!next || next === active) { speak('Only one profile'); return; }
+      try {
+        store.setActiveProfile(next);
+      } catch (e) {
+        console.error('[Hub] setActiveProfile failed:', e);
+        speak('Could not switch profile');
+        return;
+      }
+      // setActiveProfile persists, broadcasts narbe-profile-changed and fires
+      // subscribers; reapplyHubSettingsForProfile() (below) re-reads + re-renders.
+      speak(`Profile ${next}`);
+    }
+
+    function createNewProfile() {
+      if (!profileApiReady() || !canCreateProfileSafe()) return;
+      const store = getSettingsStore();
+      const util = profileUtil();
+      let raw = null;
+      try { raw = window.prompt('New profile name'); } catch (e) { raw = null; }
+      const id = (util && typeof util.normalizeProfileId === 'function')
+        ? util.normalizeProfileId(raw)
+        : (typeof raw === 'string' ? raw.trim() : '');
+      if (!id) return; // cancelled / blank
+      try {
+        store.createProfile(id);
+        store.setActiveProfile(id);
+      } catch (e) {
+        console.error('[Hub] createProfile failed:', e);
+        speak('Could not create profile');
+        return;
+      }
+      speak(`Profile ${id} created`);
+    }
+
+    if (profileSwitchBtn) {
+      profileSwitchBtn.addEventListener('click', (e) => {
+        if (isTransitioning) { e.preventDefault(); e.stopPropagation(); return; }
+        switchToNextProfile();
+      });
+    }
+    if (profileNewBtn) {
+      profileNewBtn.addEventListener('click', (e) => {
+        if (isTransitioning) { e.preventDefault(); e.stopPropagation(); return; }
+        createNewProfile();
+      });
+    }
+
+    // Re-apply the hub's settings when the active profile changes, reusing the
+    // hub's own settings re-read path: loadSettings() (theme/text/bg/size from
+    // the now-active namespace) -> applySettings(), plus a scan-manager reload
+    // mirroring closeIframe()'s post-app sync. Then refresh the switcher chrome.
+    function reapplyHubSettingsForProfile() {
+      try { loadSettings(); } catch (e) { console.error('[Hub] loadSettings on profile change failed:', e); }
+      if (window.NarbeScanManager && typeof window.NarbeScanManager.reload === 'function') {
+        try { window.NarbeScanManager.reload(); } catch (e) { /* best effort */ }
+      }
+      try { applySettings(); } catch (e) { /* applySettings already guards its DOM reads */ }
+      renderProfileSwitcher();
+    }
+
+    // The contract says setActiveProfile "broadcasts narbe-profile-changed".
+    // Listen for both a window CustomEvent and a postMessage of that type so we
+    // re-apply regardless of which broadcast style SettingsStore uses.
+    if (typeof window !== 'undefined' && window.addEventListener) {
+      window.addEventListener('narbe-profile-changed', reapplyHubSettingsForProfile);
+      window.addEventListener('message', (event) => {
+        if (event && event.data && event.data.type === 'narbe-profile-changed') {
+          reapplyHubSettingsForProfile();
+        }
+      });
+    }
+
     // Screen management
     function showScreen(name) {
       isTransitioning = true;
@@ -1865,12 +2076,19 @@
         ? Array.from(active.querySelectorAll('button:not([disabled])'))
             .filter(el => !el.hasAttribute('disabled'))
         : [];
+      // Append the IP-7 profile switcher's controls (only when shown) so the
+      // household switch / new-profile buttons scan consistently with the rest
+      // of the hub chrome. Skips disabled (single-profile) and hidden buttons.
+      const profileTargets = (profileSwitcher && !profileSwitcher.hidden)
+        ? Array.from(profileSwitcher.querySelectorAll('button:not([disabled])'))
+            .filter(el => !el.hidden)
+        : [];
       // Append the shared HUD's controls so Back / Pause / Settings are scanned
       // consistently alongside the active screen's own buttons.
       const hudTargets = (bennyHud && typeof bennyHud.getTargets === 'function')
         ? bennyHud.getTargets()
         : [];
-      return screenButtons.concat(hudTargets);
+      return screenButtons.concat(profileTargets).concat(hudTargets);
     }
 
     function speakFocusedElement(el) {
@@ -2332,7 +2550,15 @@
       } catch(e) {
         console.error('Error loading settings:', e);
       }
-      
+
+      // Render the IP-7 profile switcher (hidden unless the SettingsStore profile
+      // API is loaded). Safe no-op when the API/helper is absent.
+      try {
+        renderProfileSwitcher();
+      } catch(e) {
+        console.error('Error rendering profile switcher:', e);
+      }
+
       try {
         await loadAppsData();
       } catch(e) {
