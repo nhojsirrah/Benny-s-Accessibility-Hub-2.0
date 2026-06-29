@@ -610,6 +610,7 @@ function init() {
     applyTheme();
     setupInput();
     setupScan();
+    setupPauseOverlay();
     initHotStreak();
 
     if (window.NarbeScanManager) {
@@ -969,6 +970,7 @@ function showMainMenu() {
 
     document.getElementById('menu-container').style.display = 'flex';
     document.getElementById('game-container-inner').style.display = 'none';
+    if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
     document.getElementById('pause-overlay').style.display = 'none';
     document.getElementById('slot-machine')?.classList.remove('bonus-mode');
 
@@ -987,10 +989,100 @@ function showSettingsMenu() {
     startAutoScan();
 }
 
+// --- Shared pause overlay (shared/pause-overlay.js, window.BennyPauseOverlay) ---
+// The MAIN pause menu is served by the shared <benny-pause-overlay> when the module
+// is present; the pause-settings sub-page and the no-overlay fallback keep using the
+// legacy in-page #pause-overlay rendering + scan wiring. pauseOverlay stays null when
+// the contract is absent, which routes every pause path back to the bespoke menu.
+let pauseOverlay = null;
+
+// The MAIN pause actions in the shared overlay's { id, label, onSelect } shape,
+// derived from menus.pause so labels + handlers stay verbatim. Built fresh on each
+// show/refresh so the cooldown-dependent "Buy 500 Credits" label is current. The
+// legacy menus.pause array is retained for the no-overlay fallback path.
+function pauseOverlayActions() {
+    return menus.pause.map((item, i) => ({
+        id: String(i),
+        label: typeof item.text === 'function' ? item.text() : item.text,
+        onSelect: () => { if (item.action) item.action(); }
+    }));
+}
+
+// Create the shared overlay if the contract is present. On any failure (or when the
+// module is absent) pauseOverlay stays null and the app falls back to the legacy menu.
+function setupPauseOverlay() {
+    if (typeof window === 'undefined' || !window.BennyPauseOverlay) return;
+    try {
+        pauseOverlay = window.BennyPauseOverlay.create({
+            actions: pauseOverlayActions(),
+            scanManager: window.NarbeScanManager,
+            voice: window.NarbeVoiceManager
+        });
+    } catch (e) {
+        console.warn('BennyPauseOverlay.create failed; using legacy pause menu:', e);
+        pauseOverlay = null;
+    }
+}
+
+// True while the shared overlay is the active pause surface (pause mode, MAIN pause
+// page, overlay created and open). When true the ScanController scans the overlay's
+// action buttons and selection runs through overlay.activate(); the pause-settings
+// sub-page and the no-overlay fallback report false here and keep the legacy wiring.
+function pauseOverlayActive() {
+    return (
+        state.mode === 'pause' &&
+        state.pauseMenuState === 'main' &&
+        !!pauseOverlay &&
+        pauseOverlay.isOpen()
+    );
+}
+
+// Highlight the focused overlay action button, honoring the user's highlight
+// style/color. Operates only on the buttons getTargets() exposes, so it stays
+// decoupled from the overlay's internal DOM.
+function updatePauseOverlayHighlight() {
+    if (!pauseOverlay) return;
+    const targets = pauseOverlay.getTargets() || [];
+    const idx = state.pauseIndex;
+    const color = getHighlightColor();
+    targets.forEach((btn, i) => {
+        if (!btn || !btn.style) return;
+        if (i === idx) {
+            btn.classList.add('highlight');
+            if (settings.highlightStyle === 'full') {
+                btn.style.backgroundColor = color;
+                btn.style.outline = '';
+            } else {
+                btn.style.outline = `6px solid ${color}`;
+                btn.style.backgroundColor = '';
+            }
+        } else {
+            btn.classList.remove('highlight');
+            btn.style.outline = '';
+            btn.style.backgroundColor = '';
+        }
+    });
+}
+
 function showPauseMenu() {
     state.mode = 'pause';
     state.pauseMenuState = 'main';
     state.pauseIndex = 0;
+
+    if (pauseOverlay) {
+        // Shared overlay path: keep the legacy #pause-overlay hidden (it is reused
+        // only for the pause-settings sub-page), refresh the action labels (the
+        // "Buy 500 Credits" label is cooldown-dependent), show the overlay, and seat
+        // the scan highlight on the first action.
+        document.getElementById('pause-overlay').style.display = 'none';
+        pauseOverlay.setActions(pauseOverlayActions());
+        pauseOverlay.show();
+        reseatScan();
+        updatePauseOverlayHighlight();
+        speak("Paused. Continue");
+        startAutoScan();
+        return;
+    }
 
     document.getElementById('pause-overlay').style.display = 'flex';
     document.getElementById('pause-overlay').innerHTML = '';
@@ -1004,6 +1096,11 @@ function showPauseMenu() {
 function showPauseSettings() {
     state.pauseMenuState = 'settings';
     state.pauseIndex = 0;
+    // The pause-settings sub-page is not part of the shared overlay contract; hide
+    // the overlay and render the settings grid into the legacy #pause-overlay.
+    if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
+    const overlay = document.getElementById('pause-overlay');
+    if (overlay) overlay.style.display = 'flex';
     renderMenu('pause-overlay', menus.pauseSettings, "⚙️ SETTINGS");
     announceCurrentPauseItem();
     reseatScan();
@@ -1164,6 +1261,16 @@ function refreshMenu() {
 }
 
 function refreshPauseMenu() {
+    // Shared overlay path: rebuild the action labels (e.g. after a credit purchase
+    // flips the "Buy 500 Credits" item to its cooldown countdown) and keep the scan
+    // highlight on the current action.
+    if (pauseOverlayActive()) {
+        pauseOverlay.setActions(pauseOverlayActions());
+        reseatScan();
+        updatePauseOverlayHighlight();
+        announceCurrentPauseItem();
+        return;
+    }
     const items = state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
     items.forEach((item, index) => {
         const btn = document.getElementById(`btn-pause-overlay-${index}`);
@@ -1260,6 +1367,7 @@ function startGame() {
 
     document.getElementById('menu-container').style.display = 'none';
     document.getElementById('game-container-inner').style.display = 'flex';
+    if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
     document.getElementById('pause-overlay').style.display = 'none';
     document.getElementById('slot-machine').classList.remove('bonus-mode');
 
@@ -1274,6 +1382,7 @@ function startGame() {
 
 function resumeGame() {
     state.mode = 'game';
+    if (pauseOverlay && pauseOverlay.isOpen()) pauseOverlay.hide();
     document.getElementById('pause-overlay').style.display = 'none';
     updateHighlights();
     speak("Resumed");
@@ -2376,6 +2485,12 @@ function getHighlightColor() {
 }
 
 function updateHighlights() {
+    // The shared pause overlay owns its own highlight surface; delegate to it.
+    if (pauseOverlayActive()) {
+        updatePauseOverlayHighlight();
+        return;
+    }
+
     // Clear ALL buttons that might have highlight styles
     document.querySelectorAll('.menu-button, .action-button, .spin-button, .autoplay-button, .bet-button, .pause-scan-button, .highlight, .highlight-full').forEach(el => {
         el.classList.remove('highlight', 'highlight-full');
@@ -2465,7 +2580,10 @@ const AUTOPLAY_SCAN_TARGETS = autoplayOptions.concat([{ label: 'Cancel', cancel:
 function getScanTargets() {
     if (state.mode === 'menu') return menus[state.menuState];
     if (state.mode === 'game') return state.gameActions;
-    if (state.mode === 'pause') return state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
+    if (state.mode === 'pause') {
+        if (pauseOverlayActive()) return pauseOverlay.getTargets() || [];
+        return state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
+    }
     if (state.mode === 'gameover') return menus.gameover;
     if (state.mode === 'autoplay-menu') return AUTOPLAY_SCAN_TARGETS;
     return [];
@@ -2524,6 +2642,17 @@ function onScanAnnounce(target, index) {
 
 // Short Enter/Space select -> run the existing per-mode action.
 function onScanSelect() {
+    // MAIN pause page via the shared overlay: run the focused action through the
+    // overlay's activate() (fires the action's onSelect + emits `pause-action`).
+    if (pauseOverlayActive()) {
+        const targets = pauseOverlay.getTargets() || [];
+        const target = targets[state.pauseIndex];
+        if (target) {
+            playSound('select');
+            pauseOverlay.activate(target);
+        }
+        return;
+    }
     selectItem();
 }
 
@@ -2677,7 +2806,10 @@ if (typeof module !== 'undefined' && module.exports) {
         showSettingsMenu,
         startGame,
         showPauseMenu,
+        showPauseSettings,
         showAutoplayMenu,
-        getScan: () => scan
+        getScan: () => scan,
+        getPauseOverlay: () => pauseOverlay,
+        pauseOverlayActions
     };
 }
