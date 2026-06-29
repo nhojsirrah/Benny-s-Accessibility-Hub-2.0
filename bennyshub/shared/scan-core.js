@@ -14,6 +14,17 @@
  * modules (NarbeScanManager, NarbeVoiceManager). Apps read window.ScanController.
  * A dual CommonJS export is provided so jsdom tests can require() the class.
  *
+ * Two-level (nested) scanning:
+ *   - The default is single-axis: pass getTargets and one flat list is scanned.
+ *   - Optionally, pass getGroups + getItems(group) to scan TWO levels (e.g. the
+ *     keyboard's rows -> buttons-in-row). Space scans the current level; a short
+ *     Enter at the group level DESCENDS into the focused group (its items become
+ *     the scan targets); a short Enter at the item level SELECTS, calling
+ *     onSelect(item, { group, itemIndex }). ascend() returns to the group level
+ *     (descend() is also exposed). onFocus / onAnnounce fire at BOTH levels. When
+ *     getGroups is not provided the controller behaves exactly as the single-axis
+ *     version — the default is fully backward-compatible.
+ *
  * Design notes:
  *   - scanManager and voice are INJECTABLE fields. Logic never references the
  *     window globals directly — it reads this.scanManager / this.voice — so tests
@@ -28,7 +39,18 @@ class ScanController {
   constructor(options = {}) {
     const opts = options || {};
 
-    if (typeof opts.getTargets !== "function") {
+    // Nested (two-level) mode is enabled by providing getGroups. In that mode
+    // getItems(group) is also required and getTargets is not used (the active
+    // targets are derived per level). Single-axis mode is unchanged: getTargets
+    // is required.
+    const nested = typeof opts.getGroups === "function";
+    if (nested) {
+      if (typeof opts.getItems !== "function") {
+        throw new Error(
+          "ScanController: getItems is required (and must be a function) when getGroups is provided",
+        );
+      }
+    } else if (typeof opts.getTargets !== "function") {
       throw new Error(
         "ScanController: getTargets is required and must be a function",
       );
@@ -48,6 +70,11 @@ class ScanController {
     this.getTargets = opts.getTargets;
     this.onFocus = opts.onFocus;
     this.onSelect = opts.onSelect;
+
+    // Nested-mode collaborators (null in single-axis mode).
+    this.nested = nested;
+    this.getGroups = nested ? opts.getGroups : null;
+    this.getItems = nested ? opts.getItems : null;
 
     // Optional callbacks.
     this.onBlur = typeof opts.onBlur === "function" ? opts.onBlur : null;
@@ -93,8 +120,16 @@ class ScanController {
     // Allow option override of autoScan; otherwise derived from scanManager at start().
     this._autoScanOption = opts.autoScan; // boolean | undefined
 
-    // Index state.
+    // Index state. In nested mode, _index always tracks the ACTIVE level's
+    // cursor (group level or item level) so all movement code is shared.
     this._index = -1;
+
+    // Nested-level state. _level is "group" or "item"; _groupIndex remembers the
+    // selected group so ascend() can restore the group cursor; _currentGroup is
+    // the group whose items are currently being scanned.
+    this._level = "group";
+    this._groupIndex = -1;
+    this._currentGroup = undefined;
 
     // Attachment state.
     this._attachedEl = null;
@@ -272,6 +307,61 @@ class ScanController {
     }
   }
 
+  // ---- Active targets (level-aware) ----
+
+  // Resolves the list that the cursor is currently scanning. Single-axis mode
+  // returns getTargets(); nested mode returns the groups at the group level and
+  // the current group's items at the item level. Everything downstream (_move,
+  // _focusTo, focusIndex, getCurrentTarget) reads through here so the movement,
+  // wrap, focus and announce logic is shared across both levels.
+  _activeTargets() {
+    if (!this.nested) return this.getTargets() || [];
+    if (this._level === "item") {
+      if (this._currentGroup === undefined) return [];
+      return this.getItems(this._currentGroup) || [];
+    }
+    return this.getGroups() || [];
+  }
+
+  // ---- Nested level navigation ----
+
+  getLevel() {
+    return this._level;
+  }
+
+  getCurrentGroup() {
+    return this._currentGroup;
+  }
+
+  getGroupIndex() {
+    return this._groupIndex;
+  }
+
+  // Descend into the currently-focused group: its items become the scan targets.
+  // No-op outside nested mode, already at the item level, or with no group
+  // focused. Leaves the item cursor at -1 so the next scan lands on the first
+  // item (matching the keyboard's row -> drill-in -> scan flow).
+  descend() {
+    if (!this.nested || this._level !== "group") return this;
+    const groups = this.getGroups() || [];
+    if (this._index < 0 || this._index >= groups.length) return this;
+    this._groupIndex = this._index;
+    this._currentGroup = groups[this._index];
+    this._level = "item";
+    this._index = -1;
+    return this;
+  }
+
+  // Return to the group level, restoring the previously-focused group cursor.
+  // No-op outside nested mode or when already at the group level.
+  ascend() {
+    if (!this.nested || this._level !== "item") return this;
+    this._level = "group";
+    this._currentGroup = undefined;
+    this._index = this._groupIndex;
+    return this;
+  }
+
   // ---- Movement ----
 
   advance() {
@@ -283,7 +373,7 @@ class ScanController {
   }
 
   _move(delta) {
-    const targets = this.getTargets() || [];
+    const targets = this._activeTargets();
     const n = targets.length;
     if (n === 0) return; // no-op on empty targets
 
@@ -305,7 +395,7 @@ class ScanController {
   }
 
   _focusTo(nextIndex, targets) {
-    const list = targets || this.getTargets() || [];
+    const list = targets || this._activeTargets();
     if (list.length === 0) return;
 
     // Blur the previously-focused target (if any and still valid).
@@ -338,14 +428,34 @@ class ScanController {
   }
 
   select() {
-    const target = this.getCurrentTarget();
-    this.onSelect(target, this._index);
+    // Single-axis: select the focused target.
+    if (!this.nested) {
+      const target = this.getCurrentTarget();
+      this.onSelect(target, this._index);
+      return;
+    }
+
+    // Nested, group level: a short select DESCENDS into the focused group rather
+    // than selecting it (matching the keyboard's Enter-to-drill-in flow). With no
+    // group focused there is nothing to descend into, so this is a no-op.
+    if (this._level === "group") {
+      this.descend();
+      return;
+    }
+
+    // Nested, item level: select the focused item, reporting the owning group and
+    // the item index.
+    const item = this.getCurrentTarget();
+    this.onSelect(item, {
+      group: this._currentGroup,
+      itemIndex: this._index,
+    });
   }
 
   // ---- Index helpers ----
 
   focusIndex(i) {
-    const targets = this.getTargets() || [];
+    const targets = this._activeTargets();
     if (targets.length === 0) return;
     let idx = i;
     if (idx < 0) idx = 0;
@@ -362,7 +472,7 @@ class ScanController {
   }
 
   getCurrentTarget() {
-    const targets = this.getTargets() || [];
+    const targets = this._activeTargets();
     if (this._index < 0 || this._index >= targets.length) return undefined;
     return targets[this._index];
   }

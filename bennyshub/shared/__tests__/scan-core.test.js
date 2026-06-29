@@ -586,4 +586,257 @@ describe("Constructor validation", () => {
       () => new ScanController({ getTargets: () => [], onFocus: () => {} }),
     ).toThrow(/onSelect/);
   });
+
+  test("nested mode: getGroups without getItems throws", () => {
+    expect(
+      () =>
+        new ScanController({
+          getGroups: () => [],
+          onFocus: () => {},
+          onSelect: () => {},
+        }),
+    ).toThrow(/getItems/);
+  });
+
+  test("nested mode: getTargets is NOT required when getGroups is provided", () => {
+    expect(
+      () =>
+        new ScanController({
+          getGroups: () => [],
+          getItems: () => [],
+          onFocus: () => {},
+          onSelect: () => {},
+        }),
+    ).not.toThrow();
+  });
+});
+
+// ---- Nested (two-level) scanning ----------------------------------------
+
+function buildNested(extra = {}) {
+  const onFocus = jest.fn();
+  const onSelect = jest.fn();
+  const onAnnounce = jest.fn();
+  const groups =
+    extra.groups !== undefined
+      ? extra.groups
+      : [
+          { id: "row0", items: ["a", "b"] },
+          { id: "row1", items: ["c", "d", "e"] },
+        ];
+
+  const controller = new ScanController({
+    getGroups: () => groups,
+    getItems: (g) => g.items,
+    onFocus,
+    onSelect,
+    onAnnounce,
+    ...(extra.options || {}),
+  });
+
+  return { controller, onFocus, onSelect, onAnnounce, groups };
+}
+
+describe("Nested scanning: group level", () => {
+  test("starts at the group level", () => {
+    const { controller } = buildNested();
+    track(controller);
+    expect(controller.getLevel()).toBe("group");
+    expect(controller.getIndex()).toBe(-1);
+  });
+
+  test("Space cycles groups and wraps", () => {
+    const { controller, onFocus, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0);
+    expect(controller.getLevel()).toBe("group");
+    expect(onFocus).toHaveBeenLastCalledWith(groups[0], 0);
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(1);
+    expect(onFocus).toHaveBeenLastCalledWith(groups[1], 1);
+
+    // Two groups -> wraps back to 0.
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0);
+  });
+
+  test("onAnnounce fires at the group level", () => {
+    const { controller, onAnnounce, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(onAnnounce).toHaveBeenCalledWith(groups[0], 0);
+  });
+
+  test("short Enter at group level with nothing focused is a no-op", () => {
+    const { controller, onSelect } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter");
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(controller.getLevel()).toBe("group");
+    expect(controller.getIndex()).toBe(-1);
+  });
+});
+
+describe("Nested scanning: descend / item level", () => {
+  test("short Enter on a focused group descends (does not select)", () => {
+    const { controller, onSelect, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0 focused
+
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // descend
+
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(controller.getLevel()).toBe("item");
+    expect(controller.getGroupIndex()).toBe(0);
+    expect(controller.getCurrentGroup()).toBe(groups[0]);
+    expect(controller.getIndex()).toBe(-1); // first Space lands on first item
+  });
+
+  test("after descending, Space cycles items and wraps", () => {
+    const { controller, onFocus } = buildNested();
+    track(controller).attach();
+
+    // Focus + descend into group 1 (three items: c, d, e).
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 1
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // descend into group 1
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0);
+    expect(onFocus).toHaveBeenLastCalledWith("c", 0);
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(1);
+    expect(onFocus).toHaveBeenLastCalledWith("d", 1);
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(2);
+    expect(onFocus).toHaveBeenLastCalledWith("e", 2);
+
+    // Three items -> wraps back to 0.
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0);
+    expect(onFocus).toHaveBeenLastCalledWith("c", 0);
+  });
+
+  test("short Enter on an item selects with { group, itemIndex }", () => {
+    const { controller, onSelect, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 1
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // descend into group 1
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // item 0 (c)
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // item 1 (d)
+
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // select item 1
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith("d", {
+      group: groups[1],
+      itemIndex: 1,
+    });
+    // Still at the item level after selecting.
+    expect(controller.getLevel()).toBe("item");
+  });
+});
+
+describe("Nested scanning: ascend / back", () => {
+  test("ascend() returns to the group level at the prior group", () => {
+    const { controller } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 1
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // descend into group 1
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // item 0
+
+    controller.ascend();
+
+    expect(controller.getLevel()).toBe("group");
+    expect(controller.getIndex()).toBe(1); // restored group cursor
+    expect(controller.getCurrentGroup()).toBeUndefined();
+
+    // Scanning resumes at the group level (two groups -> wraps to 0).
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(0);
+  });
+
+  test("ascend() at the group level is a no-op", () => {
+    const { controller } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0
+    controller.ascend();
+    expect(controller.getLevel()).toBe("group");
+    expect(controller.getIndex()).toBe(0);
+  });
+
+  test("descend() explicit method mirrors Enter drill-in", () => {
+    const { controller, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // group 0
+    controller.descend();
+
+    expect(controller.getLevel()).toBe("item");
+    expect(controller.getCurrentGroup()).toBe(groups[0]);
+    expect(controller.getIndex()).toBe(-1);
+  });
+
+  test("full keyboard flow: row -> drill-in -> scan -> select", () => {
+    const { controller, onSelect, groups } = buildNested();
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // row 0 focused
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // drill into row 0
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // button 0 (a)
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // button 1 (b)
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // select button 1
+
+    expect(onSelect).toHaveBeenCalledWith("b", {
+      group: groups[0],
+      itemIndex: 1,
+    });
+  });
 });
