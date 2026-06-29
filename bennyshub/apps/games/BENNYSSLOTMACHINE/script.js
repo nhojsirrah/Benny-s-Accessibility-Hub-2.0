@@ -609,6 +609,7 @@ function init() {
     createDOMStructure();
     applyTheme();
     setupInput();
+    setupScan();
     initHotStreak();
 
     if (window.NarbeScanManager) {
@@ -626,12 +627,33 @@ function init() {
     showMainMenu();
 }
 
+// Settings keys whose semantics match the shared SettingsStore global schema and are
+// therefore synced cross-app. highlightStyle's values ('outline' | 'full') match the
+// canonical enum exactly. The casino THEMES and the local 8-colour highlight palette
+// (highlightColorIndex) stay app-local — their index spaces differ from the shared
+// schema — as do tts/sound. (Themes are flagged out of scope in shared/themes.js.)
+const GLOBAL_SETTINGS_KEYS = ['highlightStyle'];
+
 function loadSettings() {
     try {
         const saved = localStorage.getItem('megaslots_settings_v2');
         if (saved) Object.assign(settings, JSON.parse(saved));
     } catch (e) {
         console.error("Failed to load settings", e);
+    }
+    // Adopt the shared SettingsStore for the cross-app global keys, seeding the store
+    // from the local blob the first time and otherwise preferring the stored value.
+    if (typeof window !== 'undefined' && window.SettingsStore) {
+        try {
+            const g = window.SettingsStore.global;
+            GLOBAL_SETTINGS_KEYS.forEach((key) => {
+                const v = g.get(key);
+                if (v !== undefined) settings[key] = v;
+                else g.set(key, settings[key]);
+            });
+        } catch (e) {
+            console.warn('SettingsStore adoption failed:', e);
+        }
     }
 }
 
@@ -654,6 +676,14 @@ function loadCredits() {
 
 function saveSettings() {
     localStorage.setItem('megaslots_settings_v2', JSON.stringify(settings));
+    if (typeof window !== 'undefined' && window.SettingsStore) {
+        try {
+            const g = window.SettingsStore.global;
+            GLOBAL_SETTINGS_KEYS.forEach((key) => { g.set(key, settings[key]); });
+        } catch (e) {
+            console.warn('SettingsStore save failed:', e);
+        }
+    }
 }
 
 function saveCredits() {
@@ -864,7 +894,9 @@ function exitGame() {
     speak("Exiting to Hub");
     stopBackgroundMusic();
     setTimeout(() => {
-        if (window.parent && window.parent !== window) {
+        if (window.Nav && typeof window.Nav.goBack === 'function') {
+            window.Nav.goBack();
+        } else if (window.parent && window.parent !== window) {
             window.parent.postMessage({ action: 'focusBackButton' }, '*');
         } else {
             window.location.href = '../../../index.html';
@@ -942,6 +974,7 @@ function showMainMenu() {
 
     renderMenu('menu-container', menus.main, "MEGA SLOTS", `💰 Credits: ${state.credits}`);
     speak("Mega Slots. Play");
+    reseatScan();
     startAutoScan();
 }
 
@@ -950,6 +983,7 @@ function showSettingsMenu() {
     state.menuIndex = 0;
     renderMenu('menu-container', menus.settings, "⚙️ SETTINGS");
     announceCurrentMenuItem();
+    reseatScan();
     startAutoScan();
 }
 
@@ -963,6 +997,7 @@ function showPauseMenu() {
 
     renderMenu('pause-overlay', menus.pause, "⏸️ PAUSED");
     speak("Paused. Continue");
+    reseatScan();
     startAutoScan();
 }
 
@@ -971,6 +1006,7 @@ function showPauseSettings() {
     state.pauseIndex = 0;
     renderMenu('pause-overlay', menus.pauseSettings, "⚙️ SETTINGS");
     announceCurrentPauseItem();
+    reseatScan();
     startAutoScan();
 }
 
@@ -990,6 +1026,7 @@ function showGameOver() {
     
     playSound('lose');
     speak("Out of credits! " + (canRefill ? "Get free credits" : `Come back in ${getTimeUntilRefill()}`));
+    reseatScan();
     startAutoScan();
 }
 
@@ -1168,7 +1205,7 @@ function startAutoScan() {
         state.timers.autoScan = setInterval(() => {
             // Skip this scan tick if spinning or if user is holding spacebar/enter
             if (state.spinning || state.input.spaceHeld || state.input.enterHeld) return;
-            scanForward();
+            if (scan) scan.advance();
         }, speed);
     }
 }
@@ -1228,6 +1265,7 @@ function startGame() {
 
     updateGameUI();
     updateHighlights();
+    reseatScan();
     startAutoScan();
     startBackgroundMusic();
 
@@ -1239,6 +1277,7 @@ function resumeGame() {
     document.getElementById('pause-overlay').style.display = 'none';
     updateHighlights();
     speak("Resumed");
+    reseatScan();
     startAutoScan();
 }
 
@@ -1435,6 +1474,7 @@ function showAutoplayMenu() {
     
     updateHighlights();
     speak("Autoplay. 10 spins");
+    reseatScan();
     startAutoScan();
 }
 
@@ -1443,6 +1483,7 @@ function closeAutoplayMenu() {
     document.getElementById('pause-overlay').style.display = 'none';
     state.scanIndex = 4;
     updateHighlights();
+    reseatScan();
     startAutoScan();
 }
 
@@ -1456,6 +1497,8 @@ function startAutoplay(mode, count) {
     
     updateAutoplayButton();
     
+    reseatScan();
+
     const modeText = mode === 'bonus' ? 'until bonus' : `${count} spins`;
     speak(`Autoplay started. ${modeText}`);
     
@@ -2390,197 +2433,151 @@ function updateGameUI() {
     document.getElementById('status-display').innerText = `💎 Credits: ${state.credits}`;
 }
 
-// --- Input Handling ---
-// Note: The scan-manager (scan-manager.js) intercepts keydown/keyup events and applies
-// anti-tremor filtering. If a press is too short (below sensitivity threshold), it blocks
-// the event and fires 'narbe-input-cancelled'. We must listen for both normal keyup AND
-// the cancelled event to properly handle all cases.
+// --- Input Handling & Scan Engine (shared ScanController) ---
+// Scanning is delegated to the shared ScanController (shared/scan-core.js):
+//   - Space short-press advances; hold (>= config.longPress) reverse-scans.
+//   - Enter / NumpadEnter short-press selects; hold (>= config.longPress) runs the
+//     menu "previous value" toggle (onPrev), repeating every config.repeatInterval.
+// Reel-spin / payout timing stays app-bound (doSpin + the reel timers); only the
+// menu/scan layer moved onto the controller. The shared NarbeScanManager keeps its
+// capture-phase 200ms input cooldown; that same anti-tremor floor is mirrored onto
+// the controller via minIntervalMs so the gate survives even without the manager.
 
+let scan = null;
+
+// Active scan cadence: NarbeScanManager owns scan speed; fall back to 2000ms.
+function resolveScanInterval() {
+    if (window.NarbeScanManager) return window.NarbeScanManager.getScanInterval();
+    return 2000;
+}
+
+// Original anti-tremor floor: the shared scan-manager rejects a new press landing
+// less than 200ms (INPUT_COOLDOWN_MS) after the previous release. Mirror that exact
+// interval onto the controller so the gate is preserved even without the manager.
+const INPUT_SENSITIVITY_MS = 200;
+
+// Single-axis scan targets for the autoplay menu (the spin-count options plus a
+// trailing Cancel), giving the controller the right length to wrap over.
+const AUTOPLAY_SCAN_TARGETS = autoplayOptions.concat([{ label: 'Cancel', cancel: true }]);
+
+// Active target list, re-read by the controller on every step so it always reflects
+// the current mode/menu.
+function getScanTargets() {
+    if (state.mode === 'menu') return menus[state.menuState];
+    if (state.mode === 'game') return state.gameActions;
+    if (state.mode === 'pause') return state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
+    if (state.mode === 'gameover') return menus.gameover;
+    if (state.mode === 'autoplay-menu') return AUTOPLAY_SCAN_TARGETS;
+    return [];
+}
+
+// Per-mode cursor read by updateHighlights / the announce helpers / selectItem.
+function getCurrentModeIndex() {
+    if (state.mode === 'menu') return state.menuIndex;
+    if (state.mode === 'game') return state.scanIndex;
+    if (state.mode === 'pause') return state.pauseIndex;
+    if (state.mode === 'gameover') return state.gameoverIndex;
+    if (state.mode === 'autoplay-menu') return state.autoplayMenuIndex;
+    return -1;
+}
+
+function setCurrentModeIndex(index) {
+    if (state.mode === 'menu') state.menuIndex = index;
+    else if (state.mode === 'game') state.scanIndex = index;
+    else if (state.mode === 'pause') state.pauseIndex = index;
+    else if (state.mode === 'gameover') state.gameoverIndex = index;
+    else if (state.mode === 'autoplay-menu') state.autoplayMenuIndex = index;
+}
+
+// Align the controller cursor with the app's current per-mode index after any
+// screen/menu transition (each show* helper sets the app index, then calls this).
+function reseatScan() {
+    if (scan) scan.setIndex(getCurrentModeIndex());
+}
+
+// --- Controller callbacks ---
+
+// Fires on every scan step (manual or auto): click feedback, sync the app's
+// per-mode index, repaint the highlight. Announcing happens in onScanAnnounce.
+function onScanFocus(target, index) {
+    playSound('click');
+    setCurrentModeIndex(index);
+    updateHighlights();
+}
+
+// Mode-specific TTS, mirroring the announcements the hand-rolled scan emitted.
+function onScanAnnounce(target, index) {
+    if (state.mode === 'menu') {
+        announceCurrentMenuItem();
+    } else if (state.mode === 'game') {
+        announceGameAction();
+    } else if (state.mode === 'pause') {
+        announceCurrentPauseItem();
+    } else if (state.mode === 'gameover') {
+        const item = menus.gameover[state.gameoverIndex];
+        const txt = (typeof item.text === 'function' ? item.text() : item.text).replace(/[🎁🏠⏳]/g, '');
+        speak(txt);
+    } else if (state.mode === 'autoplay-menu') {
+        announceAutoplayOption();
+    }
+}
+
+// Short Enter/Space select -> run the existing per-mode action.
+function onScanSelect() {
+    selectItem();
+}
+
+// Enter held past the hold threshold -> the menu "previous value" toggle, repeated
+// by the controller every config.repeatInterval.
+function onScanPause() {
+    performBackwardsToggle();
+}
+
+function setupScan() {
+    if (!window.ScanController) {
+        console.error('ScanController not loaded — scanning will be unavailable.');
+        return;
+    }
+    scan = new window.ScanController({
+        getTargets: getScanTargets,
+        onFocus: onScanFocus,
+        onAnnounce: onScanAnnounce,
+        onSelect: onScanSelect,
+        onPause: onScanPause,
+        wrap: true,
+        spaceHoldMs: config.longPress,           // hold Space >= 3s -> reverse scan
+        reverseCadenceMs: config.repeatInterval, // reverse step cadence (fixed 2s, as before)
+        enterHoldMs: config.longPress,           // hold Enter >= 3s -> previous-value toggle
+        onPauseRepeatMs: config.repeatInterval,  // repeat the toggle every 2s while held
+        minIntervalMs: (window.NarbeScanManager && typeof window.NarbeScanManager.getInputSensitivity === 'function')
+            ? window.NarbeScanManager.getInputSensitivity()
+            : INPUT_SENSITIVITY_MS,              // anti-tremor floor (original scan-manager 200ms cooldown)
+        scanManager: window.NarbeScanManager,
+        voice: window.NarbeVoiceManager
+    });
+    scan.attach(document);
+}
+
+// --- Input bridge ---
+// The controller owns Space/Enter/NumpadEnter via its own capture-phase listeners.
+// Here we only (a) track which switch is held so auto-scan skips ticks while held,
+// mirroring the original guard, (b) re-phase auto-scan on each press so a manual
+// switch is never immediately followed by an auto-advance, and (c) lazily init audio.
 function setupInput() {
     document.addEventListener('keydown', e => {
         if (e.repeat) return; // Ignore auto-repeat from held keys
-        
-        if (e.code === 'Space') {
-            // Only set spaceHeld if not already held and no backward scan in progress
-            if (!state.input.spaceHeld && !state.timers.spaceRepeat) {
-                state.input.spaceHeld = true;
-                state.input.spaceTime = Date.now();
-                resetAutoScan();
-                e.preventDefault();
-                // Start timer for long press (backward scan)
-                state.timers.space = setTimeout(() => {
-                    if (state.input.spaceHeld) {
-                        startBackwardsScan();
-                    }
-                    state.timers.space = null;
-                }, config.longPress);
-            }
-        } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-            if (!state.input.enterHeld) {
-                state.input.enterHeld = true;
-                state.input.enterTime = Date.now();
-                resetAutoScan();
-                e.preventDefault();
-                // Long press for backwards toggle in menus
-                if (state.mode === 'menu' || state.mode === 'pause') {
-                    state.timers.enter = setTimeout(() => {
-                        if (state.input.enterHeld) {
-                            startBackwardsToggle();
-                        }
-                        state.timers.enter = null;
-                    }, config.longPress);
-                }
-            }
-        }
-    });
+        if (e.code === 'Space') { state.input.spaceHeld = true; resetAutoScan(); }
+        else if (e.code === 'Enter' || e.code === 'NumpadEnter') { state.input.enterHeld = true; resetAutoScan(); }
+    }, true);
 
     document.addEventListener('keyup', e => {
-        if (e.code === 'Space') {
-            // Clear the hold timeout
-            if (state.timers.space) {
-                clearTimeout(state.timers.space);
-                state.timers.space = null;
-            }
-            
-            // Check if we were backward scanning
-            const wasBackwardScanning = state.timers.spaceRepeat !== null;
-            stopBackwardsScan();
-            
-            // Only forward scan on short press if NOT backward scanning
-            if (state.input.spaceHeld && !wasBackwardScanning) {
-                const duration = Date.now() - state.input.spaceTime;
-                if (duration < config.longPress) {
-                    scanForward();
-                }
-            }
-            
-            state.input.spaceHeld = false;
-            resetAutoScan();
-        } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-            // Clear the hold timeout
-            if (state.timers.enter) {
-                clearTimeout(state.timers.enter);
-                state.timers.enter = null;
-            }
-            
-            // Check if we were doing backwards toggle
-            const wasBackwardsToggle = state.timers.enterRepeat !== null;
-            stopBackwardsToggle();
-            
-            // Only select on short press if NOT backwards toggling
-            if (state.input.enterHeld && !wasBackwardsToggle) {
-                const duration = Date.now() - state.input.enterTime;
-                if (duration < config.longPress) {
-                    selectItem();
-                }
-            }
-            
-            state.input.enterHeld = false;
-            resetAutoScan();
-        }
-    });
-    
-    // Listen for cancelled inputs from scan-manager (anti-tremor filtering)
-    // When the scan-manager blocks a too-short press, it fires this event
-    document.addEventListener('narbe-input-cancelled', (e) => {
-        if (e.detail && (e.detail.key === ' ' || e.detail.code === 'Space')) {
-            // Clear timers and state
-            if (state.timers.space) {
-                clearTimeout(state.timers.space);
-                state.timers.space = null;
-            }
-            const wasBackwardScanning = state.timers.spaceRepeat !== null;
-            stopBackwardsScan();
-            state.input.spaceHeld = false;
-            
-            // If cancelled due to 'too-short', we should NOT scan forward
-            // This is the anti-tremor behavior - quick taps are ignored
-        }
-        if (e.detail && (e.detail.key === 'Enter' || e.detail.code === 'Enter' || e.detail.code === 'NumpadEnter')) {
-            // Clear timers and state
-            if (state.timers.enter) {
-                clearTimeout(state.timers.enter);
-                state.timers.enter = null;
-            }
-            stopBackwardsToggle();
-            state.input.enterHeld = false;
-            
-            // If cancelled due to 'too-short', we should NOT select
-            // This is the anti-tremor behavior - quick taps are ignored
-        }
-    });
-    
+        if (e.code === 'Space') { state.input.spaceHeld = false; resetAutoScan(); }
+        else if (e.code === 'Enter' || e.code === 'NumpadEnter') { state.input.enterHeld = false; resetAutoScan(); }
+    }, true);
+
     // Touch/click to init audio
     document.addEventListener('click', () => initAudio(), { once: true });
     document.addEventListener('touchstart', () => initAudio(), { once: true });
-}
-
-function stopBackwardsScan() {
-    if (state.timers.spaceRepeat) {
-        clearInterval(state.timers.spaceRepeat);
-        state.timers.spaceRepeat = null;
-    }
-}
-
-function stopBackwardsToggle() {
-    if (state.timers.enterRepeat) {
-        clearInterval(state.timers.enterRepeat);
-        state.timers.enterRepeat = null;
-    }
-}
-
-function scanForward() {
-    playSound('click');
-    
-    if (state.mode === 'menu') {
-        const items = menus[state.menuState];
-        state.menuIndex = (state.menuIndex + 1) % items.length;
-        announceCurrentMenuItem();
-    } else if (state.mode === 'game') {
-        state.scanIndex = (state.scanIndex + 1) % state.gameActions.length;
-        announceGameAction();
-    } else if (state.mode === 'pause') {
-        const items = state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
-        state.pauseIndex = (state.pauseIndex + 1) % items.length;
-        announceCurrentPauseItem();
-    } else if (state.mode === 'gameover') {
-        state.gameoverIndex = (state.gameoverIndex + 1) % menus.gameover.length;
-        const item = menus.gameover[state.gameoverIndex];
-        const txt = (typeof item.text === 'function' ? item.text() : item.text).replace(/[🎁🏠⏳]/g, '');
-        speak(txt);
-    } else if (state.mode === 'autoplay-menu') {
-        const totalOptions = autoplayOptions.length + 1; // +1 for cancel
-        state.autoplayMenuIndex = (state.autoplayMenuIndex + 1) % totalOptions;
-        announceAutoplayOption();
-    }
-    updateHighlights();
-}
-
-function scanBackward() {
-    playSound('click');
-    
-    if (state.mode === 'menu') {
-        const items = menus[state.menuState];
-        state.menuIndex = (state.menuIndex - 1 + items.length) % items.length;
-        announceCurrentMenuItem();
-    } else if (state.mode === 'game') {
-        state.scanIndex = (state.scanIndex - 1 + state.gameActions.length) % state.gameActions.length;
-        announceGameAction();
-    } else if (state.mode === 'pause') {
-        const items = state.pauseMenuState === 'settings' ? menus.pauseSettings : menus.pause;
-        state.pauseIndex = (state.pauseIndex - 1 + items.length) % items.length;
-        announceCurrentPauseItem();
-    } else if (state.mode === 'gameover') {
-        state.gameoverIndex = (state.gameoverIndex - 1 + menus.gameover.length) % menus.gameover.length;
-        const item = menus.gameover[state.gameoverIndex];
-        const txt = (typeof item.text === 'function' ? item.text() : item.text).replace(/[🎁🏠⏳]/g, '');
-        speak(txt);
-    } else if (state.mode === 'autoplay-menu') {
-        const totalOptions = autoplayOptions.length + 1; // +1 for cancel
-        state.autoplayMenuIndex = (state.autoplayMenuIndex - 1 + totalOptions) % totalOptions;
-        announceAutoplayOption();
-    }
-    updateHighlights();
 }
 
 function announceAutoplayOption() {
@@ -2596,21 +2593,16 @@ function announceGameAction() {
     speak(actions[state.scanIndex] + (state.scanIndex > 0 && state.scanIndex < 5 ? `. Bet ${state.bet}` : ''));
 }
 
-function startBackwardsScan() {
-    scanBackward();
-    state.timers.spaceRepeat = setInterval(scanBackward, config.repeatInterval);
-}
-
 function selectItem() {
     playSound('select');
-    
+
     if (state.mode === 'menu') {
         const item = menus[state.menuState][state.menuIndex];
         if (item?.action) item.action();
     } else if (state.mode === 'game') {
         // Block all actions during bonus mode
         if (state.bonusMode) return;
-        
+
         // Allow pause even while spinning, but block other actions
         if (state.scanIndex === 5) {
             // Pause - allowed when not in bonus
@@ -2645,11 +2637,6 @@ function selectItem() {
     }
 }
 
-function startBackwardsToggle() {
-    performBackwardsToggle();
-    state.timers.enterRepeat = setInterval(performBackwardsToggle, config.repeatInterval);
-}
-
 function performBackwardsToggle() {
     if (state.mode === 'menu') {
         const item = menus[state.menuState][state.menuIndex];
@@ -2669,4 +2656,28 @@ function speak(text) {
     }
 }
 
-window.onload = init;
+// --- Bootstrap: a real DOM auto-inits on DOMContentLoaded; jsdom/jest require()s
+// this module and calls init() manually (the event won't re-fire under test). ---
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', init);
+}
+
+// --- Dual export: IIFE global (browser) + CommonJS (jsdom/jest) ---
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        init,
+        state,
+        settings,
+        menus,
+        themes,
+        highlightColors,
+        autoplayOptions,
+        getScanTargets,
+        showMainMenu,
+        showSettingsMenu,
+        startGame,
+        showPauseMenu,
+        showAutoplayMenu,
+        getScan: () => scan
+    };
+}
