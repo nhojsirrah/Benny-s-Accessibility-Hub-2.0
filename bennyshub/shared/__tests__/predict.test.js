@@ -338,3 +338,105 @@ describe("Predict — storage seam", () => {
     }
   });
 });
+
+// ---- profiles (IP-7) -----------------------------------------------------
+
+/** In-memory key/value storage adapter for asserting where data lands. */
+function memStorage() {
+  const map = new Map();
+  return {
+    map,
+    async get(key) {
+      return map.has(key) ? map.get(key) : null;
+    },
+    async set(key, value) {
+      map.set(key, JSON.parse(JSON.stringify(value)));
+    },
+    async remove(key) {
+      map.delete(key);
+    },
+  };
+}
+
+describe("Predict — profile-scoped storage (IP-7)", () => {
+  test("default profile uses the unchanged 'narbe.predict.*' keys", () => {
+    expect(Predict.storageKey("words")).toBe("narbe.predict.words");
+    const engine = Predict.create();
+    expect(engine.storageKey("words")).toBe("narbe.predict.words");
+  });
+
+  test("a profile id prefixes the key with 'narbe.profile.<p>.'", () => {
+    expect(Predict.storageKey("words", "ben")).toBe(
+      "narbe.profile.ben.predict.words",
+    );
+    const engine = Predict.create({ profile: "ben" });
+    expect(engine.storageKey("words")).toBe("narbe.profile.ben.predict.words");
+    expect(engine.activeProfile()).toBe("ben");
+  });
+
+  test("resolves the active profile from SettingsStore when present (guarded)", () => {
+    global.window = global.window || {};
+    global.window.SettingsStore = { getActiveProfile: () => "bob" };
+    try {
+      expect(Predict.resolveActiveProfile()).toBe("bob");
+      // Unpinned engine re-resolves on each key build.
+      const engine = Predict.create();
+      expect(engine.storageKey("words")).toBe(
+        "narbe.profile.bob.predict.words",
+      );
+    } finally {
+      delete global.window.SettingsStore;
+    }
+    // Falls back to default once SettingsStore is gone.
+    expect(Predict.resolveActiveProfile()).toBe("default");
+  });
+
+  test("persist/restore is isolated per profile (no cross-profile leak)", async () => {
+    const storage = memStorage();
+    const blank = () => ({ frequent_words: {}, bigrams: {}, trigrams: {} });
+
+    const def = Predict.create({ data: blank(), storage, profile: "default" });
+    def.learn("ALPHA");
+    const defKey = await def.persist();
+
+    const ben = Predict.create({ data: blank(), storage, profile: "ben" });
+    ben.learn("BETA");
+    const benKey = await ben.persist();
+
+    // Distinct destinations: legacy key for default, prefixed key for ben.
+    expect(defKey).toBe("narbe.predict.words");
+    expect(benKey).toBe("narbe.profile.ben.predict.words");
+    expect(storage.map.has("narbe.predict.words")).toBe(true);
+    expect(storage.map.has("narbe.profile.ben.predict.words")).toBe(true);
+
+    // Restoring default never sees ben's corpus and vice versa.
+    const defReload = Predict.create({
+      data: blank(),
+      storage,
+      profile: "default",
+    });
+    await defReload.restore();
+    expect(defReload.getData().frequent_words.ALPHA).toBeDefined();
+    expect(defReload.getData().frequent_words.BETA).toBeUndefined();
+
+    const benReload = Predict.create({
+      data: blank(),
+      storage,
+      profile: "ben",
+    });
+    await benReload.restore();
+    expect(benReload.getData().frequent_words.BETA).toBeDefined();
+    expect(benReload.getData().frequent_words.ALPHA).toBeUndefined();
+  });
+
+  test("the prediction MATH is identical regardless of profile", () => {
+    const def = Predict.create({ data: buildCorpus(), profile: "default" });
+    const ben = Predict.create({ data: buildCorpus(), profile: "ben" });
+    for (const ctx of ["I AM ", "AM ", "TH", "ZZZZ ", ""]) {
+      expect(ben.predict(ctx)).toEqual(def.predict(ctx));
+      expect(ben.getLetterPredictions(ctx)).toEqual(
+        def.getLetterPredictions(ctx),
+      );
+    }
+  });
+});

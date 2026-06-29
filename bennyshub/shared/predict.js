@@ -44,6 +44,52 @@
         ? globalThis
         : {};
 
+  // --- Profiles (IP-7) ----------------------------------------------------
+  //
+  // The engine's durable storage keys are namespaced by the active profile so
+  // each user of the same machine keeps a separate learned corpus. Back-compat
+  // is the rule: for the "default" profile the keys are UNCHANGED, so existing
+  // data IS the default profile (no migration). For a profile `p`:
+  //   "narbe.predict.words" -> "narbe.profile.<p>.predict.words"
+  // mirroring SettingsStore's namespacing exactly.
+  //
+  // The active profile is read from SettingsStore.getActiveProfile() when that
+  // module is present (guarded), else "default", and is RE-RESOLVED on every key
+  // build so a profile switch takes effect immediately without re-wiring.
+
+  const DEFAULT_PROFILE = "default";
+  const PROFILE_PREFIX = "narbe.profile.";
+  const PREDICT_KEY_PREFIX = "narbe.predict.";
+
+  /** Resolve the active profile id from SettingsStore if available, else default. */
+  function resolveActiveProfile() {
+    try {
+      const ss = GLOBAL.SettingsStore;
+      if (ss && typeof ss.getActiveProfile === "function") {
+        const id = ss.getActiveProfile();
+        if (typeof id === "string" && id) return id;
+      }
+    } catch (e) {
+      /* fall through to default */
+    }
+    return DEFAULT_PROFILE;
+  }
+
+  /**
+   * Namespace a "narbe.*" key for a profile.
+   *   default -> key UNCHANGED; p -> "narbe.profile.<p>." + key-without-"narbe."
+   */
+  function namespaceKey(baseKey, profile) {
+    if (!profile || profile === DEFAULT_PROFILE) return baseKey;
+    return PROFILE_PREFIX + profile + "." + baseKey.slice("narbe.".length);
+  }
+
+  /** Profile-scoped predict storage key for a suffix (re-resolves the profile). */
+  function predictStorageKey(suffix, profile) {
+    const p = profile || resolveActiveProfile();
+    return namespaceKey(PREDICT_KEY_PREFIX + suffix, p);
+  }
+
   const DEFAULT_WORDS = ["YES", "NO", "HELP", "THE", "I", "YOU"];
 
   // Default English letter frequencies (starting point for letter prediction).
@@ -223,6 +269,8 @@
      * @param {object} [options.predictions] Predictions provider (load/persist).
      * @param {object} [options.storage] Key/value storage adapter.
      * @param {string[]} [options.defaultWords] Override the fallback word list.
+     * @param {string} [options.profile] Pin a profile id; otherwise the active
+     *   profile is re-resolved on each key build (from SettingsStore, else default).
      */
     constructor(options = {}) {
       const opts = options || {};
@@ -233,6 +281,10 @@
         : DEFAULT_WORDS.slice();
       this.predictionsProvider = resolvePredictionsProvider(opts.predictions);
       this.storage = resolveStorageAdapter(opts.storage);
+      // When set, pins persistence to one profile; when null, the active profile
+      // is re-resolved per call so a SettingsStore profile switch is picked up.
+      this.profile =
+        typeof opts.profile === "string" && opts.profile ? opts.profile : null;
       this.dataLoaded = false;
       this.initializeLetterFrequencies();
     }
@@ -805,6 +857,58 @@
       this.data = normaliseWordData(data);
       return this.data;
     }
+
+    // --- Profile-scoped durable storage (IP-7) ---------------------------
+    //
+    // The prediction MATH is untouched; only the storage destination is
+    // profile-scoped. These use the injected `storage` adapter (localStorage by
+    // default) under a key that re-resolves the active profile on each call.
+
+    /** The active profile this engine persists under (pinned or re-resolved). */
+    activeProfile() {
+      return this.profile || resolveActiveProfile();
+    }
+
+    /**
+     * Profile-scoped storage key for a suffix.
+     *   default -> "narbe.predict.<suffix>"
+     *   p       -> "narbe.profile.<p>.predict.<suffix>"
+     */
+    storageKey(suffix) {
+      return predictStorageKey(suffix, this.activeProfile());
+    }
+
+    /**
+     * Persist the in-memory word corpus to durable storage under the active
+     * profile's key. Returns the key written. No-op semantics if storage is a
+     * no-op adapter.
+     */
+    async persist() {
+      const key = this.storageKey("words");
+      try {
+        await this.storage.set(key, this.data);
+      } catch (error) {
+        console.error("[Predict] Error persisting corpus:", error);
+      }
+      return key;
+    }
+
+    /**
+     * Restore the word corpus from durable storage for the active profile. When
+     * nothing is stored the in-memory data is left as-is. Resolves to the data.
+     */
+    async restore() {
+      const key = this.storageKey("words");
+      try {
+        const stored = await this.storage.get(key);
+        if (stored && typeof stored === "object" && stored.frequent_words) {
+          this.data = normaliseWordData(stored);
+        }
+      } catch (error) {
+        console.error("[Predict] Error restoring corpus:", error);
+      }
+      return this.data;
+    }
   }
 
   /** Factory: build an engine instance. The IP-3 entry point. */
@@ -819,6 +923,10 @@
     DEFAULT_LETTER_FREQUENCIES,
     DEFAULT_LETTER_BIGRAMS,
     DEFAULT_LETTER_TRIGRAMS,
+    // Profiles (IP-7): exposed so the hub/tests can resolve and namespace keys.
+    DEFAULT_PROFILE,
+    resolveActiveProfile,
+    storageKey: predictStorageKey,
   };
 
   if (typeof window !== "undefined") {
