@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grid Memory Engine</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!--
+      Standalone harness for the config-driven grid-memory engine. The board you
+      see is built entirely from a JSON pack (packs/*.pack.json) — switching
+      ?pack=shapes changes the whole game with no code change. That is the point.
+    -->
+    <header id="gm-header">
+      <span id="gm-title">Grid Memory</span>
+      <button id="gm-pack-toggle" type="button">Swap pack</button>
+    </header>
+    <main id="game-root"></main>
+
+    <script src="../../shared/voice-manager.js"></script>
+    <script src="../../shared/scan-manager.js"></script>
+    <script src="../../shared/scan-core.js"></script>
+    <script src="../../shared/benny-app.js"></script>
+    <script src="grid-memory-pack.js"></script>
+    <script src="grid-memory-engine.js"></script>
+    <script>
+      (function () {
+        "use strict";
+        const PACKS = ["animals", "shapes"];
+
+        function packFromQuery() {
+          const q = new URLSearchParams(location.search).get("pack");
+          return PACKS.indexOf(q) !== -1 ? q : "animals";
+        }
+
+        let current = packFromQuery();
+        let game = null;
+
+        async function loadPack(name) {
+          const res = await fetch(`packs/${name}.pack.json`);
+          if (!res.ok) throw new Error(`could not load pack ${name}`);
+          return res.json();
+        }
+
+        async function start(name) {
+          const pack = await loadPack(name);
+          document.getElementById("gm-title").textContent =
+            pack.title || pack.id;
+          const root = document.getElementById("game-root");
+          if (!game) {
+            game = new GridMemoryEngine({ pack }).mount(root);
+            game.scan && game.scan.start && game.scan.start();
+          } else {
+            game.loadPack(pack);
+          }
+        }
+
+        document
+          .getElementById("gm-pack-toggle")
+          .addEventListener("click", function () {
+            const i = PACKS.indexOf(current);
+            current = PACKS[(i + 1) % PACKS.length];
+            start(current);
+          });
+
+        start(current);
+      })();
+    </script>
+  </body>
+</html>

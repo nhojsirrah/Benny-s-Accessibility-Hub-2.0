@@ -1,0 +1,108 @@
+/* Grid Memory engine — standalone harness styling. The game DOM (.gm-grid /
+   .gm-tile / .gm-focus) is produced by grid-memory-engine.js; these rules are
+   the default skin a host page can override. */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+}
+
+#gm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  font-size: 22px;
+  font-weight: 700;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+}
+
+#gm-pack-toggle {
+  font: inherit;
+  font-size: 16px;
+  padding: 8px 16px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  cursor: pointer;
+}
+
+#game-root {
+  flex: 1;
+  padding: 10px;
+}
+
+.gm-grid {
+  width: 100%;
+  height: 100%;
+  gap: 8px;
+}
+
+.gm-cell {
+  width: 100%;
+  height: 100%;
+}
+
+.gm-inactive {
+  opacity: 0.25;
+}
+
+.gm-tile {
+  width: 100%;
+  height: 100%;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  background: #444;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(14px, 4vw, 28px);
+  font-weight: 700;
+  color: #111;
+  transition:
+    transform 0.08s ease,
+    border-color 0.08s ease;
+}
+
+.gm-tile.gm-revealed {
+  background: #fff;
+}
+
+.gm-tile.gm-matched {
+  background: #2e8b57;
+  color: #fff;
+}
+
+.gm-tile img {
+  max-width: 80%;
+  max-height: 80%;
+  object-fit: contain;
+}
+
+/* Scan highlight applied by the engine's onFocus hook. */
+.gm-tile.gm-focus {
+  border: 8px solid #ffd700;
+  transform: scale(1.03);
+  box-shadow: 0 0 16px #ffd700;
+}
