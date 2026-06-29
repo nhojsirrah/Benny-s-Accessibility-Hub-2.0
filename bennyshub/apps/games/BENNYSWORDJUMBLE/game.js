@@ -1,14 +1,16 @@
 // --- Configuration & Constants ---
-const themes = [
-    { name: 'Default', bg: 'linear-gradient(135deg, #ff4b1f, #ff9068)', highlight: '#ffff00' },
-    { name: 'Ocean', bg: 'linear-gradient(135deg, #2193b0, #6dd5ed)', highlight: '#ffffff' },
-    { name: 'Midnight', bg: 'linear-gradient(135deg, #232526, #414345)', highlight: '#00ff00' },
-    { name: 'Forest', bg: 'linear-gradient(135deg, #134e5e, #71b280)', highlight: '#ffcc00' },
-    { name: 'Sunset', bg: 'linear-gradient(135deg, #f12711, #f5af19)', highlight: '#ffff00' },
-    { name: 'Lavender', bg: 'linear-gradient(135deg, #834d9b, #d04ed6)', highlight: '#00ffff' },
-    { name: 'Mint', bg: 'linear-gradient(135deg, #00b09b, #96c93d)', highlight: '#ffffff' },
-    { name: 'Dark Blue', bg: 'linear-gradient(135deg, #0f2027, #203a43, #2c5364)', highlight: '#00ffcc' }
-];
+// Background themes come from the shared Themes module (loaded via
+// <script src="../../../shared/themes.js">). WordJumble's local array was
+// byte-identical to Themes.THEMES — it is in fact the source the canonical
+// per-theme `highlight` values were extracted from (pinned by
+// shared/__tests__/themes.test.js) — so this is a behavior-preserving swap.
+const themes = window.Themes.THEMES;
+
+// NOTE: WordJumble keeps its OWN highlight palette below. Unlike the themes,
+// this list is NOT equivalent to Themes.HIGHLIGHT_COLORS (it is an 11-entry
+// {name,val} palette with a different set/order of colors), so replacing it
+// would change the on-screen highlight colors and the stored color index.
+// Adopting it is out of scope for this behavior-preserving sweep.
 
 const highlightColors = [
     { name: 'Theme Default', val: 'var(--theme-highlight)' },
@@ -39,6 +41,22 @@ const difficulties = {
         { label: "Hard", hp: 2 }
     ]
 };
+
+// Settings are persisted through the shared SettingsStore. These cross-app keys
+// live in the global store; everything else is a WordJumble per-app key.
+const WJ_APP_ID = "wordjumble";
+const WJ_GLOBAL_SETTING_KEYS = [
+    "autoScan",
+    "scanSpeedIndex",
+    "highlightStyle",
+    "highlightColorIndex",
+];
+
+function wjStoreForSetting(key) {
+    return WJ_GLOBAL_SETTING_KEYS.indexOf(key) !== -1
+        ? window.SettingsStore.global
+        : window.SettingsStore.app(WJ_APP_ID);
+}
 
 // --- Game Class ---
 class WordJumbleGame {
@@ -98,8 +116,9 @@ class WordJumbleGame {
         this.mainContent = document.getElementById('main-content');
         this.createPauseOverlay();
         
-        // Initialize Audio Context for System Sounds
-        this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // Initialize Audio Context for System Sounds (absent in non-browser/test envs).
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        this.audioCtx = AudioCtx ? new AudioCtx() : null;
         
         this.loadSettings();
         this.init();
@@ -110,6 +129,8 @@ class WordJumbleGame {
         // Let's assume TTS toggle controls overall sound for now or add a sound toggle. 
         // User asked for "sound just like matchy match".
         
+        if (!this.audioCtx) return;
+
         if (this.audioCtx.state === 'suspended') {
             this.audioCtx.resume();
         }
@@ -174,26 +195,34 @@ class WordJumbleGame {
     
     loadSettings() {
         try {
-            const s = localStorage.getItem('wordjumble_settings_v2');
-            if (s) {
-                const parsed = JSON.parse(s);
-                // Migration: server -> online
-                if (parsed.dataSource === 'server') parsed.dataSource = 'online';
-                // Validate dataSource
-                if (!['online', 'local', 'all'].includes(parsed.dataSource)) parsed.dataSource = 'online';
-                
-                Object.assign(this.settings, parsed);
-            }
-            // Migrate old settings if needed or defaulting
-            if (this.settings.scanSpeedIndex >= scanSpeeds.length) this.settings.scanSpeedIndex = 1;
+            // Idempotent — converts the legacy `wordjumble_settings_v2` blob into
+            // the canonical global / per-app stores on first read.
+            window.SettingsStore.runMigrations();
+            Object.keys(this.settings).forEach((key) => {
+                const stored = wjStoreForSetting(key).get(key);
+                if (stored !== undefined) this.settings[key] = stored;
+            });
+
+            // Migration: server -> online; validate dataSource.
+            if (this.settings.dataSource === 'server') this.settings.dataSource = 'online';
+            if (!['online', 'local', 'all'].includes(this.settings.dataSource)) this.settings.dataSource = 'online';
+
+            // Clamp indices that may have drifted. highlightColorIndex is a shared
+            // global key, but WordJumble's palette is shorter than the canonical
+            // one, so guard against an out-of-range value bled in from another app.
+            if (this.settings.scanSpeedIndex >= scanSpeeds.length || this.settings.scanSpeedIndex < 0) this.settings.scanSpeedIndex = 1;
+            if (this.settings.highlightColorIndex >= highlightColors.length || this.settings.highlightColorIndex < 0) this.settings.highlightColorIndex = 0;
+
             this.applyTheme();
         } catch(e) { console.error(e); }
     }
-    
+
     saveSettings() {
-        localStorage.setItem('wordjumble_settings_v2', JSON.stringify(this.settings));
+        Object.keys(this.settings).forEach((key) => {
+            wjStoreForSetting(key).set(key, this.settings[key]);
+        });
     }
-    
+
     getHighScoreKey() {
         let key = 'highscore_' + this.settings.dataSource;
         
@@ -244,7 +273,12 @@ class WordJumbleGame {
         document.documentElement.style.setProperty('--theme-highlight', t.highlight);
         
         const hc = highlightColors[this.settings.highlightColorIndex];
-        const val = hc.val === 'var(--theme-highlight)' ? t.highlight : hc.val;
+        // For the "Theme Default" sentinel, resolve through the shared module
+        // (Themes.getThemeHighlight(t, 0) === t.highlight); concrete palette colors
+        // keep WordJumble's own hex value.
+        const val = hc.val === 'var(--theme-highlight)'
+            ? window.Themes.getThemeHighlight(t, 0)
+            : hc.val;
         document.documentElement.style.setProperty('--highlight-color', val);
         
         const style = this.settings.highlightStyle || 'outline'; 
@@ -1321,15 +1355,26 @@ class WordJumbleGame {
     exitGame() {
         this.speak("Exiting to Hub");
         setTimeout(() => {
-             // Try to exit via parent message if possible
-             if (window.parent && window.parent !== window) {
-                 window.parent.postMessage({ action: 'focusBackButton' }, '*');
-             } else {
-                 // Standalone fallback
-                 window.location.href = '../../../index.html';
-             }
+            // Leave via the shared Nav module, which sends the hub's
+            // { action: 'closeApp' } iframe contract (the hub also accepts the
+            // older 'focusBackButton' alias this app used to post). Fall back to
+            // the original standalone path if Nav is unavailable.
+            if (window.Nav && typeof window.Nav.goBack === 'function') {
+                window.Nav.goBack();
+            } else if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ action: 'focusBackButton' }, '*');
+            } else {
+                window.location.href = '../../../index.html';
+            }
         }, 500);
     }
 }
 
-const game = new WordJumbleGame();
+// Dual surface: a CommonJS export so the game can be exercised under jest +
+// jsdom, plus the browser auto-start. The auto-start is skipped when required
+// as a module (under tests) so the harness can construct instances with mocks.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { WordJumbleGame };
+} else if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    window.game = new WordJumbleGame();
+}

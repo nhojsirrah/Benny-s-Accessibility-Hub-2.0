@@ -74,6 +74,11 @@ beforeEach(() => {
   window.NarbeVoiceManager = { speak: jest.fn() };
 
   jest.resetModules();
+  // script.js now reads the shared Themes / SettingsStore / Nav globals (loaded
+  // via <script src> in the browser); expose fresh instances for jsdom.
+  window.Themes = require("../../../../shared/themes.js");
+  window.SettingsStore = require("../../../../shared/settings-store.js");
+  window.Nav = require("../../../../shared/nav.js");
   app = require("../script.js");
   app.init();
 });
