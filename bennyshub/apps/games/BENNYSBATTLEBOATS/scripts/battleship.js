@@ -62,6 +62,11 @@ let firstAttackTurn = true;  // Track first turn to start in deadzone
 let aiTargetQueue = [];
 let aiHitStack = [];
 
+// Shared single-switch scan controller (shared/scan-core.js). It owns the scan
+// index, cadence and press/hold timing; this file only supplies per-mode target
+// lists and per-mode action dispatch. Null until setupScan() runs.
+let scan = null;
+
 // =========================================
 // SETTINGS
 // =========================================
@@ -102,6 +107,17 @@ const settings = {
     scanSpeedIndex: 1  // 2 Seconds default
 };
 
+// Keys that round-trip through the shared cross-app settings contract
+// (shared/settings-store.js GLOBAL_SCHEMA). BattleBoats intentionally shares
+// NONE of its settings: highlightColorIndex indexes a bespoke {name,color}
+// palette and highlightStyleIndex is a 3-way index (Glow/Outline/Solid), neither
+// compatible with the global highlightColorIndex range nor the outline/full enum.
+// Scan speed and auto-scan are already owned by NarbeScanManager. The store is
+// still loaded so its cross-app migrations run and the contract is available if
+// BattleBoats ever gains a compatible global setting ("adopt only where clean",
+// matching ConnectFour / ChessCheckers).
+const GLOBAL_SETTINGS_KEYS = [];
+
 function loadSettings() {
     const saved = localStorage.getItem('battleBoatsSettings');
     if (saved) {
@@ -112,12 +128,32 @@ function loadSettings() {
             console.error('Failed to load settings:', e);
         }
     }
+    if (typeof window !== 'undefined' && window.SettingsStore) {
+        try {
+            const g = window.SettingsStore.global;
+            GLOBAL_SETTINGS_KEYS.forEach((key) => {
+                const v = g.get(key);
+                if (v !== undefined) settings[key] = v;
+                else g.set(key, settings[key]);
+            });
+        } catch (e) {
+            console.warn('SettingsStore adoption failed:', e);
+        }
+    }
     applyTheme();
     applyHighlightStyle();
 }
 
 function saveSettings() {
     localStorage.setItem('battleBoatsSettings', JSON.stringify(settings));
+    if (typeof window !== 'undefined' && window.SettingsStore) {
+        try {
+            const g = window.SettingsStore.global;
+            GLOBAL_SETTINGS_KEYS.forEach((key) => { g.set(key, settings[key]); });
+        } catch (e) {
+            console.warn('SettingsStore save failed:', e);
+        }
+    }
 }
 
 function applyTheme() {
@@ -736,6 +772,7 @@ function showShipActionModal(ship) {
     // Switch to modal scanning mode
     scanState.mode = 'modal';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     clearAllHighlights();
     speak(`${ship.label} selected. Rotate Ship, Move Ship, or Cancel.`);
     startAutoScan();
@@ -748,6 +785,7 @@ function hideShipActionModal() {
     // Return to button scanning mode
     scanState.mode = 'buttons';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     clearAllHighlights();
     startAutoScan();
 }
@@ -781,6 +819,7 @@ function moveFromModal() {
     // Switch to row scanning mode for placement - start in deadzone
     scanState.mode = 'row';
     scanState.rowIndex = -1;  // Start in deadzone so first scan goes to row A
+    if (scan) { scan.enterHoldMs = config.pauseLongPress; scan.setIndex(-1); }
     clearAllHighlights();
     speak(`Moving ${ships[currentShipIndex].label}. Scan rows with Space. Press Enter to select row.`);
     updateStatus(`Scan rows to place ${ships[currentShipIndex].label}.`);
@@ -976,11 +1015,17 @@ function switchToAttackPhase() {
     
     // Enable scanning - only start in deadzone on first turn, otherwise keep last position
     scanState.mode = 'game-row';
+    scanState.cellIndex = -1;
     if (firstAttackTurn) {
         scanState.rowIndex = -1;
         firstAttackTurn = false;
+        if (scan) scan.setIndex(-1);
+    } else if (scan) {
+        // Re-seat the controller onto the previously-focused row (skip if it has
+        // since been fully fired, in which case it falls back to unseated).
+        const rows = getGameRowTargets();
+        scan.setIndex(rows.findIndex(t => t.row === scanState.rowIndex));
     }
-    scanState.cellIndex = -1;
     highlightGameRow();
     
     const statusText = document.getElementById('attackStatusText');
@@ -1167,6 +1212,7 @@ function showCoverScreen(lookAwayPlayer, readyPlayer, nextAction) {
     // Set up scanning for cover screen
     scanState.mode = 'cover';
     scanState.scanIndex = 0;
+    if (scan) scan.setIndex(0);
     scanState.coverButtons = [{ element: document.getElementById('coverReadyBtn'), label: 'Ready', action: 'ready' }];
     
     // Highlight the Ready button
@@ -1207,6 +1253,7 @@ function onCoverReady() {
         
         scanState.mode = 'buttons';
         scanState.scanIndex = -1;
+        if (scan) scan.setIndex(-1);
         updateMenuButtonsList();
         
         speak('Player 2, place your ships.');
@@ -1473,6 +1520,7 @@ function showPauseModal() {
     // Switch to pause scanning mode
     scanState.mode = 'pause';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updatePauseButtonsList();
     
     speak('Game paused. Continue, Settings, or Main Menu.');
@@ -1487,11 +1535,13 @@ function hidePauseModal() {
     if (gameStarted) {
         scanState.mode = 'game-row';
         scanState.scanIndex = -1;
+        if (scan) scan.setIndex(-1);
         highlightGameRow();
         speak('Game resumed. Your turn.');
     } else {
         scanState.mode = 'buttons';
         scanState.scanIndex = -1;
+        if (scan) scan.setIndex(-1);
         speak('Resuming. Scan buttons.');
     }
     startAutoScan();
@@ -1511,6 +1561,7 @@ function showSettingsFromPause() {
     // Switch to pause-settings scanning mode
     scanState.mode = 'pause-settings';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updatePauseSettingsButtonsList();
     
     speak('Settings. Press Space to scan options.');
@@ -1528,6 +1579,7 @@ function goBackToPauseMenu() {
     // Switch back to pause scanning mode
     scanState.mode = 'pause';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updatePauseButtonsList();
     
     speak('Pause menu.');
@@ -1598,6 +1650,7 @@ function goBackFromSettings() {
         
         scanState.mode = scanState.previousMode;
         scanState.scanIndex = -1;
+        if (scan) scan.setIndex(-1);
         scanState.previousMode = null;
         clearAllHighlights();
         
@@ -1832,6 +1885,7 @@ function showMainMenu() {
     // Reset scanning state for main menu
     scanState.mode = 'main-menu';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updateMainMenuButtonsList();
     
     speak("Benny's Battle Boats. Main menu.");
@@ -1858,6 +1912,7 @@ function showSettings() {
     // Reset scanning state for settings
     scanState.mode = 'settings-menu';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updateSettingsButtonsList();
     
     speak('Settings menu. Press Space to scan options.');
@@ -1920,6 +1975,7 @@ function showPlacementScreen() {
     // Reset scanning for game buttons
     scanState.mode = 'buttons';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     updateMenuButtonsList();
     
     updateStatus('Ships randomized! Press Space to scan, Enter to select.');
@@ -2004,7 +2060,10 @@ function returnToMainMenu() {
 function exitGame() {
     speak("Exiting to Hub");
     setTimeout(() => {
-        if (window.parent && window.parent !== window) {
+        // Adopt the shared nav contract; fall back to the legacy path.
+        if (typeof window !== 'undefined' && window.Nav) {
+            window.Nav.goBack();
+        } else if (window.parent && window.parent !== window) {
             window.parent.postMessage({ action: 'focusBackButton' }, '*');
         } else {
             window.location.href = '../../../index.html';
@@ -2082,6 +2141,7 @@ function resetForNewGame() {
     // Reset scanning state
     scanState.mode = 'buttons';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     scanState.rowIndex = -1;
     scanState.cellIndex = -1;
     clearAllHighlights();
@@ -2091,7 +2151,7 @@ function resetForNewGame() {
 }
 
 // Initialize on DOM ready
-document.addEventListener('DOMContentLoaded', () => {
+function init() {
     // Load settings first
     loadSettings();
     
@@ -2196,7 +2256,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // =========================================
     // SCANNING SETUP
     // =========================================
-    setupScanningInput();
+    setupScan();
+    setupInputBridge();
     
     // Subscribe to scan manager setting changes
     if (window.NarbeScanManager) {
@@ -2210,7 +2271,11 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Start with main menu
     showMainMenu();
-});
+}
+
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', init);
+}
 
 // =========================================
 // SCANNING MODE INITIALIZATION
@@ -2238,444 +2303,8 @@ function updateMenuButtonsList() {
 }
 
 // =========================================
-// SCANNING INPUT HANDLING
-// =========================================
-function setupScanningInput() {
-    // Use window instead of document for better iframe compatibility
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    
-    // Listen for postMessage from parent hub (web app iframe support)
-    window.addEventListener('message', (event) => {
-        if (!event.data || !event.data.type) return;
-        
-        // Handle input messages from parent hub
-        if (event.data.type === 'gamehub-input-down') {
-            const action = event.data.action?.toLowerCase();
-            if (action === 'space' || action === 'scan') {
-                // Simulate space keydown
-                const fakeEvent = { code: 'Space', key: ' ', repeat: false, preventDefault: () => {} };
-                handleKeyDown(fakeEvent);
-            } else if (action === 'enter' || action === 'select' || action === 'return') {
-                // Simulate enter keydown
-                const fakeEvent = { code: 'Enter', key: 'Enter', repeat: false, preventDefault: () => {} };
-                handleKeyDown(fakeEvent);
-            }
-        } else if (event.data.type === 'gamehub-input-up') {
-            const action = event.data.action?.toLowerCase();
-            if (action === 'space' || action === 'scan') {
-                // Simulate space keyup
-                const fakeEvent = { code: 'Space', key: ' ', preventDefault: () => {} };
-                handleKeyUp(fakeEvent);
-            } else if (action === 'enter' || action === 'select' || action === 'return') {
-                // Simulate enter keyup
-                const fakeEvent = { code: 'Enter', key: 'Enter', preventDefault: () => {} };
-                handleKeyUp(fakeEvent);
-            }
-        } else if (event.data.type === 'gamehub-input') {
-            // Legacy single-shot input (press + release)
-            const action = event.data.action?.toLowerCase();
-            if (action === 'space' || action === 'scan') {
-                scanForward();
-            } else if (action === 'enter' || action === 'select' || action === 'return') {
-                selectCurrentItem();
-            }
-        } else if (event.data.type === 'narbe-voice-settings-changed') {
-            // Handle voice settings from hub
-            if (window.NarbeVoiceManager && event.data.settings) {
-                window.NarbeVoiceManager.applySettings(event.data.settings);
-            }
-        }
-    });
-    
-    // Handle input cancelled events from scan-manager (anti-tremor)
-    document.addEventListener('narbe-input-cancelled', (e) => {
-        if (e.detail && (e.detail.key === ' ' || e.detail.code === 'Space')) {
-            if (scanState.spaceTimer) {
-                clearTimeout(scanState.spaceTimer);
-                scanState.spaceTimer = null;
-            }
-            const wasBackwardScanning = scanState.spaceRepeatInterval !== null;
-            if (scanState.spaceRepeatInterval) {
-                clearInterval(scanState.spaceRepeatInterval);
-                scanState.spaceRepeatInterval = null;
-            }
-            scanState.spaceHeld = false;
-            
-            // If cancelled due to 'too-short' but wasn't backward scanning, do a forward scan
-            if (e.detail.reason === 'too-short' && !wasBackwardScanning) {
-                scanState.lastInputTime = Date.now();
-                scanForward();
-            }
-        }
-        if (e.detail && (e.detail.key === 'Enter' || e.detail.code === 'Enter' || e.detail.code === 'NumpadEnter')) {
-            // Clear enter timer to prevent accidental pause
-            if (scanState.enterTimer) {
-                clearTimeout(scanState.enterTimer);
-                scanState.enterTimer = null;
-            }
-            scanState.enterHeld = false;
-            scanState.enterLongTriggered = false;
-            
-            if (e.detail.reason === 'too-short') {
-                scanState.lastInputTime = Date.now();
-                selectCurrentItem();
-            }
-        }
-    });
-}
-
-function handleKeyDown(e) {
-    if (e.repeat) return;
-    
-    // Anti-tremor: check minimum time between inputs
-    const now = Date.now();
-    const sensitivity = window.NarbeScanManager ? window.NarbeScanManager.getInputSensitivity() : 50;
-    if (now - scanState.lastInputTime < sensitivity) {
-        return; // Ignore input - too fast (anti-tremor)
-    }
-    
-    if (e.code === 'Space') {
-        e.preventDefault();
-        if (!scanState.spaceHeld && !scanState.spaceTimer && !scanState.spaceRepeatInterval) {
-            scanState.lastInputTime = now;
-            scanState.spaceHeld = true;
-            scanState.spaceStartTime = Date.now();
-            
-            // Set up long press for backward scanning
-            scanState.spaceTimer = setTimeout(() => {
-                startBackwardScanLoop();
-                scanState.spaceTimer = null;
-            }, config.longPress);
-        }
-    } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-        e.preventDefault();
-        if (!scanState.enterHeld) {
-            scanState.lastInputTime = now;
-            scanState.enterHeld = true;
-            scanState.enterStartTime = Date.now();
-            
-            // During gameplay (attack phase only), set up 5-second hold for pause menu
-            // Don't allow pause during defense phase (enemy's turn)
-            if ((scanState.mode === 'game-row' || scanState.mode === 'game-cell') && gamePhase === 'attack') {
-                scanState.enterTimer = setTimeout(() => {
-                    scanState.enterLongTriggered = true;
-                    showPauseModal();
-                }, config.pauseLongPress);
-            } else if (gamePhase !== 'defense') {
-                // Set up long press for going back (in cell modes during placement)
-                scanState.enterTimer = setTimeout(() => {
-                    scanState.enterLongTriggered = true;
-                    handleEnterLongPress();
-                }, config.enterLongPress);
-            }
-        }
-    } else if (e.code === 'Escape') {
-        // Cancel current scanning mode and go back
-        handleEscapeKey();
-    }
-}
-
-function handleEscapeKey() {
-    switch (scanState.mode) {
-        case 'settings-menu':
-            // Go back to main menu
-            showMainMenu();
-            break;
-        case 'buttons':
-            // Go back to main menu from game
-            showMainMenu();
-            break;
-        case 'cell':
-            // Go back to row scanning
-            scanState.mode = 'row';
-            scanState.cellIndex = -1;
-            clearAllHighlights();
-            highlightRow();
-            speak('Back to row selection.');
-            announceCurrentItem();
-            startAutoScan();
-            break;
-        case 'row':
-            // Go back to button scanning
-            scanState.mode = 'buttons';
-            scanState.scanIndex = -1;
-            scanState.rowIndex = -1;
-            movingShip = false;
-            clearAllHighlights();
-            speak('Placement cancelled. Back to menu.');
-            startAutoScan();
-            break;
-        case 'ships':
-            // Go back to button scanning
-            scanState.mode = 'buttons';
-            scanState.scanIndex = -1;
-            clearAllHighlights();
-            speak('Back to menu.');
-            startAutoScan();
-            break;
-        case 'modal':
-            // Close modal
-            hideShipActionModal();
-            break;
-        case 'game-cell':
-            // Go back to row scanning
-            scanState.mode = 'game-row';
-            scanState.cellIndex = -1;
-            clearAllHighlights();
-            speak('Back to row selection.');
-            highlightGameRow();
-            break;
-        case 'game-row':
-            // During gameplay, ESC goes back to pause button focus or does nothing
-            // Pause is triggered by holding Enter for 5 seconds instead
-            speak('Hold Enter for 5 seconds to pause.');
-            break;
-        case 'game-over':
-            // Return to main menu
-            returnToMainMenu();
-            break;
-        case 'pause':
-            // Close pause modal and continue
-            hidePauseModal();
-            break;
-    }
-}
-
-function handleKeyUp(e) {
-    if (e.code === 'Space') {
-        e.preventDefault();
-        clearTimeout(scanState.spaceTimer);
-        scanState.spaceTimer = null;
-        
-        const wasBackwardScanning = scanState.spaceRepeatInterval !== null;
-        if (scanState.spaceRepeatInterval) {
-            clearInterval(scanState.spaceRepeatInterval);
-            scanState.spaceRepeatInterval = null;
-        }
-        
-        // Perform forward scan on space release (unless we were backward scanning)
-        if (!wasBackwardScanning) {
-            scanForward();
-        }
-        scanState.spaceHeld = false;
-    } else if (e.code === 'Enter' || e.code === 'NumpadEnter') {
-        e.preventDefault();
-        // Clear the long-press timer
-        if (scanState.enterTimer) {
-            clearTimeout(scanState.enterTimer);
-            scanState.enterTimer = null;
-        }
-        
-        // Perform selection on enter release (unless long press already triggered)
-        if (!scanState.enterLongTriggered) {
-            selectCurrentItem();
-        }
-        scanState.enterHeld = false;
-        scanState.enterLongTriggered = false;
-    }
-}
-
-function handleEnterLongPress() {
-    // Long-hold Enter goes back to row scanning in cell modes
-    switch (scanState.mode) {
-        case 'cell':
-            scanState.mode = 'row';
-            scanState.cellIndex = -1;
-            clearAllHighlights();
-            highlightRow();
-            speak('Back to row selection.');
-            announceCurrentItem();
-            startAutoScan();
-            break;
-        case 'game-cell':
-            scanState.mode = 'game-row';
-            scanState.cellIndex = -1;
-            clearAllHighlights();
-            highlightGameRow();
-            speak('Back to row selection.');
-            announceCurrentItem();
-            startAutoScan();
-            break;
-    }
-}
-
-function startBackwardScanLoop() {
-    scanBackward();
-    const interval = getScanInterval();
-    scanState.spaceRepeatInterval = setInterval(() => {
-        scanBackward();
-    }, interval);
-}
-
-function getScanInterval() {
-    // Use scan-manager settings
-    if (window.NarbeScanManager) {
-        return window.NarbeScanManager.getScanInterval();
-    }
-    // Fallback to local settings
-    return scanSpeeds[settings.scanSpeedIndex].interval;
-}
-
-function isAutoScanEnabled() {
-    // Use scan-manager settings
-    if (window.NarbeScanManager) {
-        return window.NarbeScanManager.getSettings().autoScan;
-    }
-    return false;
-}
-
-// =========================================
-// AUTO-SCAN
-// =========================================
-function startAutoScan() {
-    stopAutoScan();
-    
-    if (isAutoScanEnabled()) {
-        const interval = getScanInterval();
-        scanState.autoScanTimer = setInterval(() => {
-            scanForward();
-        }, interval);
-    }
-}
-
-function stopAutoScan() {
-    if (scanState.autoScanTimer) {
-        clearInterval(scanState.autoScanTimer);
-        scanState.autoScanTimer = null;
-    }
-}
-
-function restartAutoScan() {
-    startAutoScan();
-}
-
-// =========================================
-// SCAN FORWARD / BACKWARD
-// =========================================
-function scanForward() {
-    // Block scanning during defense phase (enemy's turn) in active game, except for pause menus
-    if (gameStarted && gamePhase === 'defense' && scanState.mode !== 'pause' && scanState.mode !== 'pause-settings') return;
-    
-    playSound('scan');
-    
-    switch (scanState.mode) {
-        case 'main-menu':
-            scanMainMenuForward();
-            break;
-        case 'settings-menu':
-            scanSettingsMenuForward();
-            break;
-        case 'buttons':
-            scanMenuButtonsForward();
-            break;
-        case 'ships':
-            scanShipsForward();
-            break;
-        case 'modal':
-            scanModalForward();
-            break;
-        case 'row':
-            scanRowForward();
-            break;
-        case 'cell':
-            scanCellForward();
-            break;
-        case 'game-row':
-            scanGameRowForward();
-            break;
-        case 'game-cell':
-            scanGameCellForward();
-            break;
-        case 'game-over':
-            scanGameOverForward();
-            break;
-        case 'pause':
-            scanPauseForward();
-            break;
-        case 'cover':
-            // Cover screen only has one button - just highlight it
-            highlightCoverButton();
-            break;
-        case 'pause-settings':
-            scanPauseSettingsForward();
-            break;
-    }
-    
-    restartAutoScan();
-}
-
-function scanBackward() {
-    // Block scanning during defense phase (enemy's turn) in active game, except for pause menus
-    if (gameStarted && gamePhase === 'defense' && scanState.mode !== 'pause' && scanState.mode !== 'pause-settings') return;
-    
-    playSound('scan');
-    
-    switch (scanState.mode) {
-        case 'main-menu':
-            scanMainMenuBackward();
-            break;
-        case 'settings-menu':
-            scanSettingsMenuBackward();
-            break;
-        case 'buttons':
-            scanMenuButtonsBackward();
-            break;
-        case 'ships':
-            scanShipsBackward();
-            break;
-        case 'modal':
-            scanModalBackward();
-            break;
-        case 'row':
-            scanRowBackward();
-            break;
-        case 'cell':
-            scanCellBackward();
-            break;
-        case 'game-row':
-            scanGameRowBackward();
-            break;
-        case 'game-cell':
-            scanGameCellBackward();
-            break;
-        case 'game-over':
-            scanGameOverBackward();
-            break;
-        case 'pause':
-            scanPauseBackward();
-            break;
-        case 'cover':
-            // Cover screen only has one button - just highlight it
-            highlightCoverButton();
-            break;
-        case 'pause-settings':
-            scanPauseSettingsBackward();
-            break;
-    }
-}
-
-// =========================================
 // MAIN MENU SCANNING
 // =========================================
-function scanMainMenuForward() {
-    updateMainMenuButtonsList();
-    if (scanState.mainMenuButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.mainMenuButtons.length;
-    highlightMainMenuButton();
-    announceCurrentItem();
-}
-
-function scanMainMenuBackward() {
-    updateMainMenuButtonsList();
-    if (scanState.mainMenuButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.mainMenuButtons.length) % scanState.mainMenuButtons.length;
-    highlightMainMenuButton();
-    announceCurrentItem();
-}
-
 function highlightMainMenuButton() {
     clearAllHighlights();
     
@@ -2688,24 +2317,6 @@ function highlightMainMenuButton() {
 // =========================================
 // SETTINGS MENU SCANNING
 // =========================================
-function scanSettingsMenuForward() {
-    updateSettingsButtonsList();
-    if (scanState.settingsButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.settingsButtons.length;
-    highlightSettingsButton();
-    announceCurrentItem();
-}
-
-function scanSettingsMenuBackward() {
-    updateSettingsButtonsList();
-    if (scanState.settingsButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.settingsButtons.length) % scanState.settingsButtons.length;
-    highlightSettingsButton();
-    announceCurrentItem();
-}
-
 function highlightSettingsButton() {
     clearAllHighlights();
     
@@ -2718,24 +2329,6 @@ function highlightSettingsButton() {
 // =========================================
 // GAME OVER SCANNING
 // =========================================
-function scanGameOverForward() {
-    updateGameOverButtonsList();
-    if (scanState.gameOverButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.gameOverButtons.length;
-    highlightGameOverButton();
-    announceCurrentItem();
-}
-
-function scanGameOverBackward() {
-    updateGameOverButtonsList();
-    if (scanState.gameOverButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.gameOverButtons.length) % scanState.gameOverButtons.length;
-    highlightGameOverButton();
-    announceCurrentItem();
-}
-
 function highlightGameOverButton() {
     clearAllHighlights();
     
@@ -2748,24 +2341,6 @@ function highlightGameOverButton() {
 // =========================================
 // PAUSE SCANNING
 // =========================================
-function scanPauseForward() {
-    updatePauseButtonsList();
-    if (scanState.pauseButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.pauseButtons.length;
-    highlightPauseButton();
-    announceCurrentItem();
-}
-
-function scanPauseBackward() {
-    updatePauseButtonsList();
-    if (scanState.pauseButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.pauseButtons.length) % scanState.pauseButtons.length;
-    highlightPauseButton();
-    announceCurrentItem();
-}
-
 function highlightPauseButton() {
     clearAllHighlights();
     
@@ -2778,24 +2353,6 @@ function highlightPauseButton() {
 // =========================================
 // PAUSE SETTINGS SCANNING
 // =========================================
-function scanPauseSettingsForward() {
-    updatePauseSettingsButtonsList();
-    if (scanState.pauseSettingsButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.pauseSettingsButtons.length;
-    highlightPauseSettingsButton();
-    announceCurrentItem();
-}
-
-function scanPauseSettingsBackward() {
-    updatePauseSettingsButtonsList();
-    if (scanState.pauseSettingsButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.pauseSettingsButtons.length) % scanState.pauseSettingsButtons.length;
-    highlightPauseSettingsButton();
-    announceCurrentItem();
-}
-
 function highlightPauseSettingsButton() {
     clearAllHighlights();
     
@@ -2821,24 +2378,6 @@ function highlightCoverButton() {
 // =========================================
 // MENU BUTTON SCANNING (Back, Randomize, Place Ships)
 // =========================================
-function scanMenuButtonsForward() {
-    updateMenuButtonsList();
-    if (scanState.menuButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.menuButtons.length;
-    highlightMenuButton();
-    announceCurrentItem();
-}
-
-function scanMenuButtonsBackward() {
-    updateMenuButtonsList();
-    if (scanState.menuButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.menuButtons.length) % scanState.menuButtons.length;
-    highlightMenuButton();
-    announceCurrentItem();
-}
-
 function highlightMenuButton() {
     clearAllHighlights();
     
@@ -2892,24 +2431,6 @@ function buildShipScanList() {
     });
 }
 
-function scanShipsForward() {
-    buildShipScanList();
-    if (scanState.shipButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.shipButtons.length;
-    highlightShip();
-    announceCurrentItem();
-}
-
-function scanShipsBackward() {
-    buildShipScanList();
-    if (scanState.shipButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.shipButtons.length) % scanState.shipButtons.length;
-    highlightShip();
-    announceCurrentItem();
-}
-
 function highlightShip() {
     clearAllHighlights();
     
@@ -2953,24 +2474,6 @@ function updateModalButtonsList() {
     if (cancelBtn) scanState.modalButtons.push({ element: cancelBtn, label: 'Cancel' });
 }
 
-function scanModalForward() {
-    updateModalButtonsList();
-    if (scanState.modalButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex + 1) % scanState.modalButtons.length;
-    highlightModalButton();
-    announceCurrentItem();
-}
-
-function scanModalBackward() {
-    updateModalButtonsList();
-    if (scanState.modalButtons.length === 0) return;
-    
-    scanState.scanIndex = (scanState.scanIndex - 1 + scanState.modalButtons.length) % scanState.modalButtons.length;
-    highlightModalButton();
-    announceCurrentItem();
-}
-
 function highlightModalButton() {
     clearAllHighlights();
     
@@ -2983,26 +2486,6 @@ function highlightModalButton() {
 // =========================================
 // ROW SCANNING (for ship placement)
 // =========================================
-function scanRowForward() {
-    // Row indices: -1 (deadzone), 0-9 (rows A-J)
-    // Total of 11 virtual positions
-    let currentVirtual = scanState.rowIndex === -1 ? 10 : scanState.rowIndex;
-    currentVirtual = (currentVirtual + 1) % 11;
-    scanState.rowIndex = currentVirtual === 10 ? -1 : currentVirtual;
-    highlightRow();
-    announceCurrentItem();
-}
-
-function scanRowBackward() {
-    // Row indices: -1 (deadzone), 0-9 (rows A-J)
-    // Total of 11 virtual positions
-    let currentVirtual = scanState.rowIndex === -1 ? 10 : scanState.rowIndex;
-    currentVirtual = (currentVirtual - 1 + 11) % 11;
-    scanState.rowIndex = currentVirtual === 10 ? -1 : currentVirtual;
-    highlightRow();
-    announceCurrentItem();
-}
-
 function highlightRow() {
     clearAllHighlights();
     
@@ -3025,40 +2508,6 @@ function highlightRow() {
 // =========================================
 // CELL SCANNING (within selected row)
 // =========================================
-function scanCellForward() {
-    const nextIndex = scanState.cellIndex + 1;
-    if (nextIndex >= 10) {
-        // Wrapped around - go back to row mode
-        scanState.mode = 'row';
-        scanState.cellIndex = -1;
-        clearAllHighlights();
-        highlightRow();
-        speak('Back to row selection.');
-        announceCurrentItem();
-        return;
-    }
-    scanState.cellIndex = nextIndex;
-    highlightCell();
-    announceCurrentItem();
-}
-
-function scanCellBackward() {
-    const nextIndex = scanState.cellIndex - 1;
-    if (nextIndex < 0) {
-        // Wrapped around - go back to row mode
-        scanState.mode = 'row';
-        scanState.cellIndex = -1;
-        clearAllHighlights();
-        highlightRow();
-        speak('Back to row selection.');
-        announceCurrentItem();
-        return;
-    }
-    scanState.cellIndex = nextIndex;
-    highlightCell();
-    announceCurrentItem();
-}
-
 function highlightCell() {
     clearAllHighlights();
     
@@ -3104,42 +2553,6 @@ function previewShipPlacement(row, col) {
 // =========================================
 // GAME ROW SCANNING (for firing at enemy)
 // =========================================
-function scanGameRowForward() {
-    // Row indices: -1 (deadzone), 0-9 (rows A-J)
-    // Total of 11 virtual positions
-    let currentVirtual = scanState.rowIndex === -1 ? 10 : scanState.rowIndex;
-    let attempts = 0;
-    
-    do {
-        currentVirtual = (currentVirtual + 1) % 11;
-        attempts++;
-        // Stop if we've checked all positions (avoid infinite loop)
-        if (attempts > 11) break;
-    } while (currentVirtual !== 10 && isRowFullyFired(currentVirtual));
-    
-    scanState.rowIndex = currentVirtual === 10 ? -1 : currentVirtual;
-    highlightGameRow();
-    announceCurrentItem();
-}
-
-function scanGameRowBackward() {
-    // Row indices: -1 (deadzone), 0-9 (rows A-J)
-    // Total of 11 virtual positions
-    let currentVirtual = scanState.rowIndex === -1 ? 10 : scanState.rowIndex;
-    let attempts = 0;
-    
-    do {
-        currentVirtual = (currentVirtual - 1 + 11) % 11;
-        attempts++;
-        // Stop if we've checked all positions (avoid infinite loop)
-        if (attempts > 11) break;
-    } while (currentVirtual !== 10 && isRowFullyFired(currentVirtual));
-    
-    scanState.rowIndex = currentVirtual === 10 ? -1 : currentVirtual;
-    highlightGameRow();
-    announceCurrentItem();
-}
-
 function isRowFullyFired(row) {
     // Check if all cells in this row have been fired at
     for (let col = 0; col < 10; col++) {
@@ -3173,65 +2586,6 @@ function highlightGameRow() {
 // =========================================
 // GAME CELL SCANNING (for firing at enemy)
 // =========================================
-function scanGameCellForward() {
-    // Find next unfired cell in row (scanning columns 1-10)
-    const startIndex = scanState.cellIndex;
-    let nextIndex = scanState.cellIndex + 1;
-    
-    // Skip already fired cells
-    while (nextIndex < 10 && isCellAlreadyFired(scanState.rowIndex, nextIndex)) {
-        nextIndex++;
-    }
-    
-    if (nextIndex >= 10) {
-        // Wrapped around or no more cells - go back to row mode
-        scanState.mode = 'game-row';
-        scanState.cellIndex = -1;
-        clearAllHighlights();
-        highlightGameRow();
-        speak('Back to row selection.');
-        announceCurrentItem();
-        return;
-    }
-    
-    scanState.cellIndex = nextIndex;
-    highlightGameCell();
-    announceCurrentItem();
-}
-
-function scanGameCellBackward() {
-    const startIndex = scanState.cellIndex;
-    let nextIndex = scanState.cellIndex - 1;
-    
-    // Skip already fired cells
-    while (nextIndex >= 0 && isCellAlreadyFired(scanState.rowIndex, nextIndex)) {
-        nextIndex--;
-    }
-    
-    if (nextIndex < 0) {
-        // Wrap to column 10 (index 9) and continue scanning backward
-        nextIndex = 9;
-        while (nextIndex >= 0 && isCellAlreadyFired(scanState.rowIndex, nextIndex)) {
-            nextIndex--;
-        }
-        
-        // If we've wrapped all the way back to start or no cells left, go to row mode
-        if (nextIndex < 0 || nextIndex === startIndex) {
-            scanState.mode = 'game-row';
-            scanState.cellIndex = -1;
-            clearAllHighlights();
-            highlightGameRow();
-            speak('Back to row selection.');
-            announceCurrentItem();
-            return;
-        }
-    }
-    
-    scanState.cellIndex = nextIndex;
-    highlightGameCell();
-    announceCurrentItem();
-}
-
 function isCellAlreadyFired(row, col) {
     // In 1P mode, check player1's attacks on enemy
     // In 2P mode, check current player's attacks
@@ -3268,55 +2622,6 @@ function highlightGameCell() {
 // =========================================
 // SELECT CURRENT ITEM
 // =========================================
-function selectCurrentItem() {
-    // Block selection during defense phase (enemy's turn) in active game, except for pause menus
-    if (gameStarted && gamePhase === 'defense' && scanState.mode !== 'pause' && scanState.mode !== 'pause-settings') return;
-    
-    playSound('select');
-    
-    switch (scanState.mode) {
-        case 'main-menu':
-            selectMainMenuButton();
-            break;
-        case 'settings-menu':
-            selectSettingsButton();
-            break;
-        case 'buttons':
-            selectMenuButton();
-            break;
-        case 'ships':
-            selectShip();
-            break;
-        case 'modal':
-            selectModalButton();
-            break;
-        case 'row':
-            enterCellMode();
-            break;
-        case 'cell':
-            placeShipAtCurrentCell();
-            break;
-        case 'game-row':
-            enterGameCellMode();
-            break;
-        case 'game-cell':
-            fireAtCurrentCell();
-            break;
-        case 'game-over':
-            selectGameOverButton();
-            break;
-        case 'pause':
-            selectPauseButton();
-            break;
-        case 'cover':
-            selectCoverButton();
-            break;
-        case 'pause-settings':
-            selectPauseSettingsButton();
-            break;
-    }
-}
-
 function selectCoverButton() {
     // Cover screen only has one button - Ready
     if (scanState.coverButtons && scanState.coverButtons.length > 0) {
@@ -3476,6 +2781,7 @@ function selectShip() {
             // Return to button scanning mode
             scanState.mode = 'buttons';
             scanState.scanIndex = -1;
+            if (scan) scan.setIndex(-1);
             clearAllHighlights();
             speak('Back to menu. Scan buttons.');
             startAutoScan();
@@ -3501,73 +2807,6 @@ function selectModalButton() {
         const btn = scanState.modalButtons[scanState.scanIndex].element;
         btn.click();
     }
-}
-
-function enterCellMode() {
-    // Don't enter cell mode if in deadzone
-    if (scanState.rowIndex === -1) {
-        speak('No row selected. Scan to select a row first.');
-        return;
-    }
-    scanState.mode = 'cell';
-    scanState.cellIndex = -1;
-    speak(`Row ${letters[scanState.rowIndex]} selected. Scan columns. Press Enter to place. Hold Enter to go back.`);
-    scanForward(); // Move to first cell
-}
-
-function placeShipAtCurrentCell() {
-    const row = scanState.rowIndex;
-    const col = scanState.cellIndex;
-    
-    // Change mode BEFORE placing so renderBoards doesn't highlight the ship
-    const previousMode = scanState.mode;
-    scanState.mode = 'buttons';
-    
-    if (placeShipAt(row, col)) {
-        playSound('place');
-        speak(`${ships[currentShipIndex].label} placed at ${getCellLabel(row, col)}.`);
-        
-        // Return to button scanning
-        scanState.scanIndex = -1;
-        movingShip = false;
-        clearAllHighlights();
-        startAutoScan();
-    } else {
-        // Restore mode if placement failed
-        scanState.mode = previousMode;
-        playSound('error');
-        speak('Cannot place here. Try another position.');
-    }
-}
-
-function enterGameCellMode() {
-    // Don't enter cell mode if in deadzone
-    if (scanState.rowIndex === -1) {
-        speak('No row selected. Scan to select a row first.');
-        return;
-    }
-    scanState.mode = 'game-cell';
-    scanState.cellIndex = -1;
-    speak(`Row ${letters[scanState.rowIndex]} selected. Scan columns. Press Enter to fire. Hold Enter to go back.`);
-    scanForward(); // Move to first unfired cell
-}
-
-function fireAtCurrentCell() {
-    const row = scanState.rowIndex;
-    const col = scanState.cellIndex;
-    
-    if (isCellAlreadyFired(row, col)) {
-        playSound('error');
-        speak('Already fired here. Choose another cell.');
-        return;
-    }
-    
-    fireAtEnemy(row, col);
-    
-    // Return to row scanning
-    scanState.mode = 'game-row';
-    scanState.scanIndex = scanState.rowIndex;
-    clearAllHighlights();
 }
 
 // =========================================
@@ -3662,28 +2901,439 @@ function announceCurrentItem() {
 // =========================================
 // MODE TRANSITIONS
 // =========================================
+
+// =========================================
+// SCAN ENGINE (shared ScanController)
+// =========================================
+
+// Resolve the active scan cadence: prefer NarbeScanManager (which owns scan speed
+// / autoScan), falling back to the local setting when it is absent. Used for both
+// auto-scan and the hold-Space reverse cadence.
+function resolveScanInterval() {
+    if (typeof window !== 'undefined' && window.NarbeScanManager) {
+        return window.NarbeScanManager.getScanInterval();
+    }
+    return scanSpeeds[settings.scanSpeedIndex].interval;
+}
+
+function setupScan() {
+    if (typeof window === 'undefined' || !window.ScanController) {
+        console.error('ScanController not loaded — scanning will be unavailable.');
+        return;
+    }
+    scan = new window.ScanController({
+        getTargets: getScanTargets,
+        onFocus: onScanFocus,
+        onSelect: onScanSelect,
+        onAnnounce: onScanAnnounce,
+        onPause: onScanPause,
+        wrap: true,
+        spaceHoldMs: config.longPress,         // hold Space >= 3s -> reverse scan
+        reverseCadenceMs: resolveScanInterval(),
+        enterHoldMs: config.pauseLongPress,    // hold Enter >= 5s -> pause (game) / back (placement cell)
+        scanManager: window.NarbeScanManager,
+        voice: window.NarbeVoiceManager
+    });
+    scan.attach(document);
+
+    // Preserve the pre-migration "re-phase auto-scan on every switch press" timing
+    // so a manual press is never immediately followed by an auto-advance.
+    const bump = (e) => {
+        if (e.repeat) return;
+        if (e.code === 'Space' || e.code === 'Enter' || e.code === 'NumpadEnter') {
+            if (!isScanBlocked()) startScan();
+        }
+    };
+    document.addEventListener('keydown', bump, true);
+    document.addEventListener('keyup', bump, true);
+}
+
+// (Re)start auto-scan, keeping the reverse cadence aligned with the current scan
+// speed. The historical startAutoScan / restartAutoScan / stopAutoScan names are
+// kept as thin wrappers so the existing call sites work unchanged.
+function startScan() {
+    if (!scan) return;
+    scan.reverseCadenceMs = resolveScanInterval();
+    scan.start();
+}
+function stopScan() { if (scan) scan.stop(); }
+function startAutoScan() { startScan(); }
+function restartAutoScan() { startScan(); }
+function stopAutoScan() { stopScan(); }
+
+// True while scanning/selection must be frozen: during the enemy's turn (defense
+// phase) the board is locked except for the pause menus. This is the two-player /
+// single-player turn gating preserved from the hand-rolled loop.
+function isScanBlocked() {
+    return gameStarted && gamePhase === 'defense' &&
+        scanState.mode !== 'pause' && scanState.mode !== 'pause-settings';
+}
+
+// --- Per-mode target lists (re-read by ScanController on every step, so they
+// reflect the live board: fully-fired rows and already-fired cells drop out) ---
+
+function getPlacementRowTargets() {
+    const targets = [];
+    for (let row = 0; row < 10; row++) {
+        targets.push({ type: 'row', row, label: `Row ${letters[row]}` });
+    }
+    return targets;
+}
+
+function getPlacementCellTargets() {
+    const row = scanState.rowIndex;
+    const targets = [];
+    if (row < 0 || row > 9) return targets;
+    for (let col = 0; col < 10; col++) {
+        targets.push({ type: 'cell', row, col, label: getCellLabel(row, col) });
+    }
+    return targets;
+}
+
+function getGameRowTargets() {
+    const targets = [];
+    for (let row = 0; row < 10; row++) {
+        if (isRowFullyFired(row)) continue;
+        targets.push({ type: 'row', row, label: `Row ${letters[row]}` });
+    }
+    return targets;
+}
+
+function getGameCellTargets() {
+    const row = scanState.rowIndex;
+    const targets = [];
+    if (row < 0 || row > 9) return targets;
+    for (let col = 0; col < 10; col++) {
+        if (isCellAlreadyFired(row, col)) continue;
+        targets.push({ type: 'cell', row, col, label: getCellLabel(row, col) });
+    }
+    return targets;
+}
+
+function getScanTargets() {
+    if (isScanBlocked()) return [];
+    switch (scanState.mode) {
+        case 'main-menu':      updateMainMenuButtonsList();      return scanState.mainMenuButtons;
+        case 'settings-menu':  updateSettingsButtonsList();      return scanState.settingsButtons;
+        case 'buttons':        updateMenuButtonsList();          return scanState.menuButtons;
+        case 'ships':          buildShipScanList();              return scanState.shipButtons;
+        case 'modal':          updateModalButtonsList();         return scanState.modalButtons;
+        case 'game-over':      updateGameOverButtonsList();      return scanState.gameOverButtons;
+        case 'pause':          updatePauseButtonsList();         return scanState.pauseButtons;
+        case 'pause-settings': updatePauseSettingsButtonsList(); return scanState.pauseSettingsButtons;
+        case 'cover':          return scanState.coverButtons || [];
+        case 'row':            return getPlacementRowTargets();
+        case 'cell':           return getPlacementCellTargets();
+        case 'game-row':       return getGameRowTargets();
+        case 'game-cell':      return getGameCellTargets();
+        default:               return [];
+    }
+}
+
+// --- Controller callbacks ---
+
+function onScanFocus(target, index) {
+    playSound('scan');
+    scanState.scanIndex = index;
+    if (target && (scanState.mode === 'row' || scanState.mode === 'game-row')) {
+        scanState.rowIndex = target.row;
+    }
+    if (target && (scanState.mode === 'cell' || scanState.mode === 'game-cell')) {
+        scanState.rowIndex = target.row;
+        scanState.cellIndex = target.col;
+    }
+    highlightCurrentMode();
+}
+
+function highlightCurrentMode() {
+    switch (scanState.mode) {
+        case 'main-menu':      highlightMainMenuButton(); break;
+        case 'settings-menu':  highlightSettingsButton(); break;
+        case 'buttons':        highlightMenuButton(); break;
+        case 'ships':          highlightShip(); break;
+        case 'modal':          highlightModalButton(); break;
+        case 'row':            highlightRow(); break;
+        case 'cell':           highlightCell(); break;
+        case 'game-row':       highlightGameRow(); break;
+        case 'game-cell':      highlightGameCell(); break;
+        case 'game-over':      highlightGameOverButton(); break;
+        case 'pause':          highlightPauseButton(); break;
+        case 'pause-settings': highlightPauseSettingsButton(); break;
+        case 'cover':          highlightCoverButton(); break;
+    }
+}
+
+function onScanAnnounce() {
+    announceCurrentItem();
+}
+
+function onScanSelect() {
+    if (isScanBlocked()) return;
+    // The controller index is authoritative; sync it into scanState so the
+    // per-mode select* helpers (which read scanState.scanIndex) act on the
+    // currently-focused target.
+    if (scan) scanState.scanIndex = scan.getIndex();
+    selectCurrentItem();
+}
+
+// Hold-Enter: during the attack phase it opens the pause menu (5s). While
+// scanning columns to place a ship it instead steps back to row scanning (the
+// placement "go back" affordance, at the historical 3s window). Elsewhere no-op.
+function onScanPause() {
+    if (scanState.mode === 'game-row' || scanState.mode === 'game-cell') {
+        if (gamePhase === 'attack') showPauseModal();
+    } else if (scanState.mode === 'cell') {
+        backToPlacementRow();
+    }
+}
+
+function backToPlacementRow() {
+    scanState.mode = 'row';
+    scanState.cellIndex = -1;
+    if (scan) { scan.enterHoldMs = config.pauseLongPress; scan.setIndex(-1); }
+    clearAllHighlights();
+    speak('Back to row selection.');
+    startScan();
+}
+
+// --- Selection dispatch (driven by the controller) ---
+
+function selectCurrentItem() {
+    // Block selection during defense phase (enemy's turn) in active game, except for pause menus
+    if (gameStarted && gamePhase === 'defense' && scanState.mode !== 'pause' && scanState.mode !== 'pause-settings') return;
+
+    playSound('select');
+
+    switch (scanState.mode) {
+        case 'main-menu':
+            selectMainMenuButton();
+            break;
+        case 'settings-menu':
+            selectSettingsButton();
+            break;
+        case 'buttons':
+            selectMenuButton();
+            break;
+        case 'ships':
+            selectShip();
+            break;
+        case 'modal':
+            selectModalButton();
+            break;
+        case 'row':
+            enterCellMode();
+            break;
+        case 'cell':
+            placeShipAtCurrentCell();
+            break;
+        case 'game-row':
+            enterGameCellMode();
+            break;
+        case 'game-cell':
+            fireAtCurrentCell();
+            break;
+        case 'game-over':
+            selectGameOverButton();
+            break;
+        case 'pause':
+            selectPauseButton();
+            break;
+        case 'cover':
+            selectCoverButton();
+            break;
+        case 'pause-settings':
+            selectPauseSettingsButton();
+            break;
+    }
+}
+
+// --- Mode transitions (descend / place / fire) ---
+
+function enterCellMode() {
+    // Don't descend from the deadzone (no row focused yet).
+    if (scanState.rowIndex === -1) {
+        speak('No row selected. Scan to select a row first.');
+        return;
+    }
+    scanState.mode = 'cell';
+    scanState.cellIndex = -1;
+    // Hold-Enter goes back to row scanning at the historical 3s window in cells.
+    if (scan) { scan.enterHoldMs = config.enterLongPress; scan.setIndex(-1); }
+    speak(`Row ${letters[scanState.rowIndex]} selected. Scan columns. Press Enter to place. Hold Enter to go back.`);
+    startScan();
+}
+
+function placeShipAtCurrentCell() {
+    const row = scanState.rowIndex;
+    const col = scanState.cellIndex;
+
+    // Change mode BEFORE placing so renderBoards doesn't highlight the ship.
+    const previousMode = scanState.mode;
+    scanState.mode = 'buttons';
+
+    if (placeShipAt(row, col)) {
+        playSound('place');
+        speak(`${ships[currentShipIndex].label} placed at ${getCellLabel(row, col)}.`);
+        scanState.scanIndex = -1;
+        movingShip = false;
+        if (scan) { scan.enterHoldMs = config.pauseLongPress; scan.setIndex(-1); }
+        clearAllHighlights();
+        startScan();
+    } else {
+        scanState.mode = previousMode;
+        playSound('error');
+        speak('Cannot place here. Try another position.');
+    }
+}
+
+function enterGameCellMode() {
+    if (scanState.rowIndex === -1) {
+        speak('No row selected. Scan to select a row first.');
+        return;
+    }
+    scanState.mode = 'game-cell';
+    scanState.cellIndex = -1;
+    if (scan) scan.setIndex(-1);
+    speak(`Row ${letters[scanState.rowIndex]} selected. Scan columns. Press Enter to fire. Hold Enter to go back.`);
+    startScan();
+}
+
+function fireAtCurrentCell() {
+    const row = scanState.rowIndex;
+    const col = scanState.cellIndex;
+
+    if (isCellAlreadyFired(row, col)) {
+        playSound('error');
+        speak('Already fired here. Choose another cell.');
+        return;
+    }
+
+    fireAtEnemy(row, col);
+
+    // Return to row scanning; the phase switch is driven by fireAtEnemy's async
+    // transitions (switchToAttackPhase re-seats the controller for the next turn).
+    scanState.mode = 'game-row';
+    scanState.cellIndex = -1;
+    if (scan) scan.setIndex(-1);
+    clearAllHighlights();
+}
+
 function enterShipSelectionMode() {
     scanState.mode = 'ships';
     scanState.scanIndex = -1;
+    if (scan) scan.setIndex(-1);
     buildShipScanList();
     speak('Select a ship to modify. Press Space to scan ships.');
-    startAutoScan();
+    startScan();
 }
 
-function enterRowScanMode() {
-    scanState.mode = 'row';
-    scanState.rowIndex = -1;  // Start in deadzone so first scan goes to row A
-    clearAllHighlights();
-    speak('Scan rows. Press Enter to select row.');
-    startAutoScan();
+// ESC backs out of the current scan context (the controller does not own ESC).
+function handleEscapeKey() {
+    switch (scanState.mode) {
+        case 'settings-menu':
+        case 'buttons':
+            showMainMenu();
+            break;
+        case 'cell':
+            backToPlacementRow();
+            break;
+        case 'row':
+            scanState.mode = 'buttons';
+            scanState.scanIndex = -1;
+            scanState.rowIndex = -1;
+            movingShip = false;
+            if (scan) { scan.enterHoldMs = config.pauseLongPress; scan.setIndex(-1); }
+            clearAllHighlights();
+            speak('Placement cancelled. Back to menu.');
+            startScan();
+            break;
+        case 'ships':
+            scanState.mode = 'buttons';
+            scanState.scanIndex = -1;
+            if (scan) scan.setIndex(-1);
+            clearAllHighlights();
+            speak('Back to menu.');
+            startScan();
+            break;
+        case 'modal':
+            hideShipActionModal();
+            break;
+        case 'game-cell':
+            scanState.mode = 'game-row';
+            scanState.cellIndex = -1;
+            if (scan) scan.setIndex(-1);
+            clearAllHighlights();
+            speak('Back to row selection.');
+            startScan();
+            break;
+        case 'game-row':
+            speak('Hold Enter for 5 seconds to pause.');
+            break;
+        case 'game-over':
+            returnToMainMenu();
+            break;
+        case 'pause':
+            hidePauseModal();
+            break;
+    }
 }
 
-function enterGameMode() {
-    scanState.mode = 'game-row';
-    scanState.rowIndex = 0;  // Start at row A
-    clearAllHighlights();
-    highlightGameRow();
-    speak('Your turn. Scan rows to target enemy.');
-    announceCurrentItem();
-    startAutoScan();
+// Bridge ESC + parent-hub switch input onto the controller. The controller owns
+// Space/Enter/NumpadEnter via its own capture-phase listeners on document; here
+// we only add ESC and translate the hub's postMessage protocol into the same
+// synthetic key events ScanController already understands.
+function setupInputBridge() {
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'Escape') handleEscapeKey();
+    });
+
+    const codeFor = (action) => {
+        const a = (action || '').toLowerCase();
+        if (a === 'space' || a === 'scan') return 'Space';
+        if (a === 'enter' || a === 'select' || a === 'return') return 'Enter';
+        return null;
+    };
+    const dispatch = (type, code) => {
+        document.dispatchEvent(new KeyboardEvent(type, { code, bubbles: true, cancelable: true }));
+    };
+
+    window.addEventListener('message', (event) => {
+        if (!event.data || !event.data.type) return;
+        if (event.data.type === 'gamehub-input-down') {
+            const code = codeFor(event.data.action); if (code) dispatch('keydown', code);
+        } else if (event.data.type === 'gamehub-input-up') {
+            const code = codeFor(event.data.action); if (code) dispatch('keyup', code);
+        } else if (event.data.type === 'gamehub-input') {
+            const code = codeFor(event.data.action);
+            if (code === 'Space' && scan) scan.advance();
+            else if (code === 'Enter' && scan) scan.select();
+        } else if (event.data.type === 'narbe-voice-settings-changed') {
+            if (window.NarbeVoiceManager && event.data.settings) {
+                window.NarbeVoiceManager.applySettings(event.data.settings);
+            }
+        }
+    });
+}
+
+// --- Dual export: IIFE global (browser) + CommonJS (jsdom/jest) ---
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        init,
+        scanState,
+        settings,
+        themes,
+        highlightColors,
+        highlightStyles,
+        getScanTargets,
+        showGame,
+        showPlacementScreen,
+        startGame,
+        randomizeAllShips,
+        getScan: () => scan,
+        getDebug: () => ({
+            ships, playerCells, enemyCells, enemyShips,
+            player1, player2, gameMode, gamePhase, gameStarted,
+            currentPlayer, currentShipIndex
+        })
+    };
 }
