@@ -35,11 +35,13 @@ class Game {
         
         // Keep existing pause menu functions
         window.resumeGame = () => {
+            this.hideSharedPauseOverlay();
             this.pauseOverlay.classList.remove('active');
             this.resumeFromPause();
         };
         
         window.restartGame = () => {
+            this.hideSharedPauseOverlay();
             this.pauseOverlay.classList.remove('active');
             
             // Make sure pause button will be visible
@@ -52,6 +54,7 @@ class Game {
         };
         
         window.quitToMenu = () => {
+            this.hideSharedPauseOverlay();
             this.pauseOverlay.classList.remove('active');
             
             // Set mode to main menu IMMEDIATELY to prevent any game resumption
@@ -63,6 +66,12 @@ class Game {
         
         // Add missing pause settings functions
         window.showPauseSettings = () => {
+            // Flat shared overlay has no sub-menu: drop back to the legacy
+            // #pauseOverlay host for the Settings list.
+            this.hideSharedPauseOverlay();
+            if (this.bennyPauseOverlay) {
+                this.pauseOverlay.classList.add('active');
+            }
             document.getElementById('pauseMenu').style.display = 'none';
             document.getElementById('pauseSettingsMenu').style.display = 'block';
             this.updatePauseSettingsDisplay();
@@ -77,6 +86,13 @@ class Game {
             document.getElementById('pauseMenu').style.display = 'block';
             this.gameState.menuOptions = ['Resume Game', 'Settings', 'Restart Game', 'Main Menu'];
             this.gameState.selectedIndex = 0;
+            // Shared overlay path: hide the legacy host and re-show the shared
+            // top-level pause overlay (it speaks "Paused" via its voice).
+            if (this.bennyPauseOverlay) {
+                this.pauseOverlay.classList.remove('active');
+                this.showSharedPauseOverlay();
+                return;
+            }
             this.highlightPauseButton(0);
             this.audioSystem.speak('Game paused');
         };
@@ -163,6 +179,58 @@ class Game {
             this.highlightPauseSettingsButton(0);
             this.audioSystem.speak('Cancelled');
         };
+
+        // Adopt the shared <benny-pause-overlay> (shared/pause-overlay.js) for
+        // the top-level pause menu, configured with the four migrated actions
+        // (js/pauseOverlay.js). Null when the shared module is unavailable, in
+        // which case the legacy bespoke pause menu is used instead.
+        this.bennyPauseOverlay =
+            typeof window !== 'undefined' && window.createBaseballPauseOverlay
+                ? window.createBaseballPauseOverlay()
+                : null;
+    }
+
+    // Show the shared pause overlay (when present): hide the legacy host's
+    // sub-menus, show the shared overlay, blur its auto-focused button so Space
+    // (scan) / Enter (select) stay on the game's scan layer, and highlight the
+    // first action. The overlay speaks "Paused" via its injected voice.
+    showSharedPauseOverlay() {
+        if (!this.bennyPauseOverlay) return;
+        document.getElementById('pauseMenu').style.display = 'block';
+        document.getElementById('pauseSettingsMenu').style.display = 'none';
+        document.getElementById('resetSeasonConfirmation').style.display = 'none';
+        this.bennyPauseOverlay.show();
+        const active = document.activeElement;
+        if (active && this.bennyPauseOverlay.contains &&
+            this.bennyPauseOverlay.contains(active) && typeof active.blur === 'function') {
+            active.blur();
+        }
+        this.highlightSharedPauseButton(0);
+    }
+
+    // Hide the shared pause overlay if present (idempotent / guarded).
+    hideSharedPauseOverlay() {
+        if (this.bennyPauseOverlay && typeof this.bennyPauseOverlay.hide === 'function') {
+            this.bennyPauseOverlay.hide();
+        }
+    }
+
+    // Highlight the focused shared-overlay action button (outline), mirroring
+    // the bespoke menu's yellow highlight; clears the others. Defensive: only
+    // sets removable inline styles on the overlay's own buttons.
+    highlightSharedPauseButton(index) {
+        if (!this.bennyPauseOverlay || typeof this.bennyPauseOverlay.getTargets !== 'function') return;
+        const buttons = this.bennyPauseOverlay.getTargets() || [];
+        buttons.forEach((btn, i) => {
+            if (!btn || !btn.style) return;
+            if (i === index) {
+                btn.style.outline = '4px solid #ffeb3b';
+                btn.style.outlineOffset = '2px';
+            } else {
+                btn.style.outline = '';
+                btn.style.outlineOffset = '';
+            }
+        });
     }
 
     showPauseMenu() {
@@ -183,6 +251,16 @@ class Game {
         this.gameState.selectedIndex = 0;
         this.gameState.menuReady = true;
         this.gameState.hasScanned = false;
+
+        // Shared overlay path: show the shared <benny-pause-overlay> and let it
+        // own the pause scan targets. The legacy #pauseOverlay host stays hidden
+        // (reused only for the flat overlay's Settings sub-menu). The overlay
+        // speaks "Paused" via its injected voice.
+        if (this.bennyPauseOverlay) {
+            this.pauseOverlay.classList.remove('active');
+            this.showSharedPauseOverlay();
+            return;
+        }
         
         // Ensure the main pause menu is visible (not settings or confirmation)
         document.getElementById('pauseMenu').style.display = 'block';

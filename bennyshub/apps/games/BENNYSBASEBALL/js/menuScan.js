@@ -84,10 +84,28 @@
       return MENU_MODES.indexOf(mode()) !== -1;
     }
 
+    // The shared pause overlay (shared/pause-overlay.js), when present and open,
+    // owns the pause scan targets: the controller scans its action buttons
+    // directly (CONTRACT: getTargets()) and a select activates the focused button
+    // (CONTRACT: activate()). When the shared module is absent the overlay is
+    // null and the legacy bespoke #pauseMenu path below is used instead.
+    function sharedPauseOverlayOpen() {
+      return !!(
+        game.bennyPauseOverlay &&
+        typeof game.bennyPauseOverlay.isOpen === "function" &&
+        game.bennyPauseOverlay.isOpen()
+      );
+    }
+
     // COLOR_SELECT is a fixed two-item axis (color cycler + Play Ball), matching
     // the original handleColorSelectScan() % 2 walk. Every other menu scans the
     // live menuOptions list (kept correct per submenu by MenuSystem / Game).
     function getTargets() {
+      // While the shared pause overlay is open it owns the targets (its action
+      // buttons), so the cursor scans them in render order.
+      if (sharedPauseOverlayOpen()) {
+        return game.bennyPauseOverlay.getTargets() || [];
+      }
       if (mode() === MODES.COLOR_SELECT) return ["color", "play"];
       return game.gameState.menuOptions || [];
     }
@@ -122,6 +140,13 @@
       // Selection runs the existing actions.
       onSelect: (target, index) => {
         if (index < 0) return;
+        // Shared overlay open: run the focused overlay action (CONTRACT:
+        // activate()), which calls that action's onSelect handler — the verbatim
+        // resumeGame / showPauseSettings / restartGame / quitToMenu functions.
+        if (sharedPauseOverlayOpen()) {
+          game.bennyPauseOverlay.activate(target);
+          return;
+        }
         if (mode() === MODES.PAUSE_MENU) {
           clickPauseButton(index);
           return;

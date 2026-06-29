@@ -463,6 +463,22 @@ class InputHandler {
     handlePauseMenuScan() {
         const gameState = this.game.gameState;
         this.menuScanAdvance();
+
+        // Shared overlay open: it owns the pause targets. Highlight + announce
+        // its focused button. (Game.showSharedPauseOverlay blurs the overlay so
+        // its own keyboard handling stays off and Space/Enter remain on this layer.)
+        if (this.game.bennyPauseOverlay && this.game.bennyPauseOverlay.isOpen()) {
+            this.game.highlightSharedPauseButton(gameState.selectedIndex);
+            const targets = this.game.bennyPauseOverlay.getTargets() || [];
+            const btn = targets[gameState.selectedIndex];
+            if (btn) {
+                this.game.audioSystem.speak(
+                    (btn.getAttribute && btn.getAttribute('aria-label')) ||
+                        btn.textContent || ''
+                );
+            }
+            return;
+        }
         
         // Check which pause menu is currently visible
         const pauseMenu = document.getElementById('pauseMenu');
@@ -594,6 +610,22 @@ class InputHandler {
     handlePauseMenuBackwardScan() {
         const gameState = this.game.gameState;
         this.menuScanBack();
+
+        // Shared overlay open: it owns the pause targets. Highlight + announce
+        // its focused button. (Game.showSharedPauseOverlay blurs the overlay so
+        // its own keyboard handling stays off and Space/Enter remain on this layer.)
+        if (this.game.bennyPauseOverlay && this.game.bennyPauseOverlay.isOpen()) {
+            this.game.highlightSharedPauseButton(gameState.selectedIndex);
+            const targets = this.game.bennyPauseOverlay.getTargets() || [];
+            const btn = targets[gameState.selectedIndex];
+            if (btn) {
+                this.game.audioSystem.speak(
+                    (btn.getAttribute && btn.getAttribute('aria-label')) ||
+                        btn.textContent || ''
+                );
+            }
+            return;
+        }
         
         // Check which pause menu is currently visible
         const pauseMenu = document.getElementById('pauseMenu');
