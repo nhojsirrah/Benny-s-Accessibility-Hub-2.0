@@ -3584,80 +3584,126 @@ function speakSelection() {
     speak(name);
 }
 
-function scanBackward() {
-    if (gameState === 'BUY') {
-        let visible_indices = getVisibleBuyOptions();
-        let current_pos = visible_indices.indexOf(menu_selected_index);
-        
-        if (current_pos === -1) {
-             menu_selected_index = visible_indices[0]; 
-        } else {
-             // Backward cycle
-             let next_pos = (current_pos - 1 + visible_indices.length) % visible_indices.length;
-             menu_selected_index = visible_indices[next_pos];
-        }
-        speakSelection();
+let settings_return_state = 'MENU';
+
+// --- Shared ScanController menu model -------------------------------------
+//
+// The MENU / settings (linear-list) scanning is driven by the shared
+// ScanController (shared/scan-core.js). getMenuTargets() exposes the current
+// menu's items as single-axis targets ({ value, label }); onFocus reuses the
+// existing highlight (menu_selected_index), onAnnounce reuses the existing
+// speak()/speakSelection() announce, and onSelect runs the existing per-menu
+// action via runMenuAction(). The in-game stomp-target cycling
+// (cycle_stomp_target / trigger_player_stomp) is app-specific and is
+// intentionally left on its own path -- see scanForward/selectAction below.
+//
+// menu_selected_index stays the single source of truth that the canvas draw
+// code reads; syncScanIndex() aligns the controller's cursor to it before each
+// move so state transitions that set menu_selected_index directly are honored.
+function getMenuTargets() {
+    switch (gameState) {
+        case 'MENU':
+            return [
+                { value: 0, label: "Play Game" },
+                { value: 1, label: "Instructions" },
+                { value: 2, label: "Settings" },
+                { value: 3, label: "Exit Game" },
+            ];
+        case 'INSTRUCTIONS':
+            return [{ value: 0, label: "Back" }];
+        case 'PAUSED':
+            return [
+                { value: 0, label: "Continue" },
+                { value: 1, label: "Restart Level" },
+                { value: 2, label: "Settings" },
+                { value: 3, label: "Main Menu" },
+            ];
+        case 'SETTINGS':
+            return [
+                { value: 0, label: "TTS" },
+                { value: 1, label: "Auto Scan" },
+                { value: 2, label: "Scan Speed" },
+                { value: 3, label: "Auto Stomp" },
+                { value: 4, label: "SFX" },
+                { value: 5, label: "Music" },
+                { value: 6, label: "Back" },
+            ];
+        case 'CONFIRM_EXIT':
+            return [
+                { value: 0, label: "Cancel" },
+                { value: 1, label: "Proceed" },
+            ];
+        case 'BUY':
+            // BUY targets are the visible store rows + bottom buttons; the
+            // underlying (possibly non-contiguous) index is carried as value.
+            return getVisibleBuyOptions().map((idx) => ({ value: idx, label: null }));
+        default:
+            return []; // non-menu states (PLAYING, LEVEL_INTRO, GAME_OVER, ...)
     }
 }
 
-let settings_return_state = 'MENU';
+function syncScanIndex() {
+    if (!menuScan) return;
+    const targets = getMenuTargets();
+    let pos = -1;
+    for (let i = 0; i < targets.length; i++) {
+        if (targets[i].value === menu_selected_index) { pos = i; break; }
+    }
+    menuScan.setIndex(pos);
+}
+
+const menuScan = new window.ScanController({
+    getTargets: getMenuTargets,
+    onFocus: (t) => { menu_selected_index = t.value; },
+    onAnnounce: (t) => {
+        // Preserve the per-menu announcement: BUY speaks the priced selection
+        // helper; every other menu speaks the item label.
+        if (gameState === 'BUY') speakSelection();
+        else if (t && t.label != null) speak(t.label);
+    },
+    onSelect: () => { runMenuAction(); },
+    wrap: true,
+    spaceHoldMs: 3000,
+    reverseCadenceMs: 2000,
+    enterHoldMs: 6000,
+    autoScan: false, // auto-scan stays frame-driven in loop() -> scanForward()
+});
+
+function scanBackward() {
+    // Reverse scanning was historically wired only for the BUY store; preserve
+    // that boundary (other menus had no reverse).
+    if (gameState === 'BUY') {
+        syncScanIndex();
+        menuScan.back();
+    }
+}
 
 function scanForward() {
-    if (gameState === 'BUY') {
-        let visible_indices = getVisibleBuyOptions();
-        
-        // If nothing selected (-1), prevent crash by just picking first option
-        if (menu_selected_index === -1) {
-             if (visible_indices.length > 0) {
-                 menu_selected_index = visible_indices[0];
-                 speakSelection();
-             }
-             return;
-        }
-
-        let current_pos = visible_indices.indexOf(menu_selected_index);
-        
-        if (current_pos === -1) {
-            menu_selected_index = visible_indices[0];
-        } else {
-            let next_pos = (current_pos + 1) % visible_indices.length;
-            menu_selected_index = visible_indices[next_pos];
-        }
-        speakSelection();
-    } 
-    else if (gameState === 'MENU') {
-         menu_selected_index = (menu_selected_index + 1) % 4;
-         let opts = ["Play Game", "Instructions", "Settings", "Exit Game"];
-         speak(opts[menu_selected_index]);
+    // In-game: Space cycles the stomp target (app-specific cadence, untouched).
+    if (gameState === 'PLAYING') {
+        cycle_stomp_target();
+        return;
     }
-    else if (gameState === 'INSTRUCTIONS') {
-         menu_selected_index = 0; // Only one option
-         speak("Back");
-    }
-    else if (gameState === 'PAUSED') {
-         menu_selected_index = (menu_selected_index + 1) % 4;
-         let opts = ["Continue", "Restart Level", "Settings", "Main Menu"];
-         speak(opts[menu_selected_index]);
-    }
-    else if (gameState === 'SETTINGS') {
-         menu_selected_index = (menu_selected_index + 1) % 7;
-         let opts = ["TTS", "Auto Scan", "Scan Speed", "Auto Stomp", "SFX", "Music", "Back"];
-         speak(opts[menu_selected_index]);
-    }
-    else if (gameState === 'CONFIRM_EXIT') {
-        // -1 -> 0 (Cancel) -> 1 (Proceed) -> 0 ...
-        if (menu_selected_index === -1) menu_selected_index = 0;
-        else menu_selected_index = (menu_selected_index + 1) % 2;
-        
-        speak(menu_selected_index === 0 ? "Cancel" : "Proceed");
-    }
-    else if (gameState === 'PLAYING') {
-         cycle_stomp_target();
-    }
+    // Menus: advance via the shared ScanController (no-op on non-menu states).
+    syncScanIndex();
+    menuScan.advance();
 }
 
 // Helper for Return action
 function selectAction() {
+    // In-game: Enter stomps the focused target (app-specific, untouched).
+    if (gameState === 'PLAYING') {
+        trigger_player_stomp();
+        return;
+    }
+    // Menus: select via the shared ScanController -> runMenuAction().
+    syncScanIndex();
+    menuScan.select();
+}
+
+// The per-menu selection action, invoked by ScanController.onSelect. This is the
+// original selectAction body for the menu states (PLAYING handled above).
+function runMenuAction() {
     if (gameState === 'MENU') {
          if (menu_selected_index === 0) {
              reset_game_state();
@@ -3674,11 +3720,7 @@ function selectAction() {
          } else {
              speak("Exiting to Hub");
              setTimeout(() => {
-                 if (window.parent && window.parent !== window) {
-                     window.parent.postMessage({ action: 'focusBackButton' }, '*');
-                 } else {
-                     window.location.href = '../../../index.html';
-                 }
+                 window.Nav.goBack();
              }, 500);
          }
     } else if (gameState === 'INSTRUCTIONS') {
@@ -3787,13 +3829,13 @@ window.addEventListener('keyup', (e) => {
     let duration = Date.now() - keyTimers[e.code];
     keysPressed[e.code] = false;
     
-    if (e.code === 'Space') {
+    if (menuScan.isScan(e)) {
         if (duration < 3000) {
             scanForward(); // Back to Forward on Tap
         }
     }
     
-    if (e.code === 'Enter') {
+    if (menuScan.isSelect(e)) {
         if (duration < 6000) {
             selectAction();
         }
@@ -3926,11 +3968,7 @@ function handleInput(x, y) {
                  } else if (i === 3) { // Exit
                      speak("Exiting to Hub");
                      setTimeout(() => {
-                         if (window.parent && window.parent !== window) {
-                             window.parent.postMessage({ action: 'focusBackButton' }, '*');
-                         } else {
-                             window.location.href = '../../../index.html';
-                         }
+                         window.Nav.goBack();
                      }, 500);
                  }
              }
@@ -4068,7 +4106,40 @@ window.addEventListener('touchstart', (e) => {
     handleInput(touch.clientX - rect.left, touch.clientY - rect.top);
 }, {passive: false});
 
-// Start
-reset_game_state();
-requestAnimationFrame(loop);
+// Start. Skipped under CommonJS/test (module.exports defaults to a truthy {}),
+// so jsdom tests can require() this file headless and drive it directly.
+if (typeof module === 'undefined' || !module.exports) {
+    reset_game_state();
+    requestAnimationFrame(loop);
+}
+
+// CommonJS export surface for jsdom tests (no-op in the browser).
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        getScan: () => menuScan,
+        getMenuTargets,
+        syncScanIndex,
+        scanForward,
+        scanBackward,
+        selectAction,
+        runMenuAction,
+        reset_game_state,
+        enter_store,
+        getVisibleBuyOptions,
+        speakSelection,
+        getState: () => ({
+            gameState,
+            menu_selected_index,
+            tts_enabled,
+            autoscan_enabled,
+            auto_stomp_enabled,
+            sfx_enabled,
+            music_enabled,
+            scan_speed_index,
+        }),
+        setGameState: (s) => { gameState = s; },
+        setMenuIndex: (i) => { menu_selected_index = i; },
+        setPoints: (p) => { points = p; },
+    };
+}
 
