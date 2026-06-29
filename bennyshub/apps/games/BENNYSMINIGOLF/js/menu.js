@@ -2,7 +2,8 @@ class MenuSystem {
     constructor(gameInstance) {
         this.game = gameInstance;
         this.uiLayer = document.getElementById('ui-layer');
-        this.active = true;
+        this._active = true;
+        this.scan = null;
         this.state = 'MAIN_MENU'; // MAIN_MENU, SETTINGS, LEVEL_SELECT
         this.selectedIndex = 0;
         this.items = [];
@@ -78,7 +79,9 @@ class MenuSystem {
             ]
         };
 
+        this.setupScanController();
         this.setupInput();
+        this.syncScan();
         this.showMainMenu();
 
         // Mouse Support
@@ -89,6 +92,7 @@ class MenuSystem {
                 const index = items.indexOf(e.target);
                 if (index !== -1) {
                     this.selectedIndex = index;
+                    this.seatScan();
                     this.selectItem();
                 }
             }
@@ -101,7 +105,8 @@ class MenuSystem {
                 const index = items.indexOf(e.target);
                 if (index !== -1 && index !== this.selectedIndex) {
                     this.selectedIndex = index;
-                    this.render(); 
+                    this.render();
+                    this.seatScan();
                 }
              }
         });
@@ -112,46 +117,118 @@ class MenuSystem {
         // The Game class will route events to us if we are active
     }
 
-    handleInput(event) {
-        if (!this.active) return;
+    // ---- Shared ScanController integration ----
+    // Menu scanning (forward short-press, hold-Space reverse, Enter / NumpadEnter
+    // select, optional auto-scan) is owned by the shared ScanController. The app
+    // only supplies the live target list, highlight, announcement and per-item
+    // action; aim / power-shot timing stays app-bound in input.js.
+    setupScanController() {
+        if (typeof window !== 'undefined' && window.ScanController) {
+            this.scan = new window.ScanController({
+                getTargets: () => (this._active ? this.getSelectableItems() : []),
+                onFocus: (item) => this.onScanFocus(item),
+                onAnnounce: (item) => this.onScanAnnounce(item),
+                onSelect: (item) => this.onScanSelect(item),
+                wrap: true,
+                spaceHoldMs: 3000, // hold Space >= 3s -> reverse scan (original menu threshold)
+                reverseCadenceMs: this.getScanInterval(),
+                // The menu has no Enter-hold action (the in-game pause long-press
+                // lives in input.js / GAMEPLAY mode), so push the hold far beyond any
+                // real press and supply no onPause: every Enter release selects.
+                enterHoldMs: 86400000,
+                // Anti-tremor rate limit. Mirrors scan-manager.js's INPUT_COOLDOWN_MS
+                // (200ms global keyup->keydown cooldown) that gated the old menu.
+                minIntervalMs: (typeof window.NarbeScanManager !== 'undefined' && typeof window.NarbeScanManager.getInputSensitivity === 'function')
+                    ? window.NarbeScanManager.getInputSensitivity()
+                    : 200,
+                getInterval: () => this.getScanInterval(),
+                scanManager: typeof window.NarbeScanManager !== 'undefined' ? window.NarbeScanManager : undefined,
+                voice: typeof window.NarbeVoiceManager !== 'undefined' ? window.NarbeVoiceManager : undefined
+            });
+        }
 
-        // Reset auto scan on any input
-        if (this.autoScanTimer) this.updateAutoScan();
+        // Expose `active` as an accessor so toggling it (here or from game.js)
+        // attaches / detaches the controller without each call site knowing about it.
+        Object.defineProperty(this, 'active', {
+            configurable: true,
+            get() { return this._active; },
+            set(v) {
+                v = !!v;
+                if (this._active === v) return;
+                this._active = v;
+                this.syncScan();
+            }
+        });
+    }
 
-        if (event === 'SCAN_NEXT') {
-            this.moveSelection(1);
-        } else if (event === 'SCAN_PREV') {
-            this.moveSelection(-1);
-        } else if (event === 'SELECT') {
-            this.selectItem();
+    // Items the scanner may land on (skips info-only rows).
+    getSelectableItems() {
+        return this.items.filter((it) => it.selectable !== false);
+    }
+
+    // Active scan cadence from NarbeScanManager (owner of scan speed), 2s fallback.
+    getScanInterval() {
+        if (typeof NarbeScanManager !== 'undefined' && NarbeScanManager.getScanInterval) {
+            return NarbeScanManager.getScanInterval();
+        }
+        return 2000;
+    }
+
+    // Attach + start the controller while a menu is active; stop + detach otherwise.
+    syncScan() {
+        if (!this.scan) return;
+        if (this._active) {
+            this.scan.reverseCadenceMs = this.getScanInterval();
+            this.scan.attach(document);
+            this.scan.start();
+        } else {
+            this.scan.stop();
+            this.scan.detach();
         }
     }
 
-    moveSelection(dir) {
-        let nextIndex = this.selectedIndex;
-        let count = 0;
-        
-        // Find next selectable item
-        do {
-            nextIndex += dir;
-            if (nextIndex < 0) nextIndex = this.items.length - 1;
-            if (nextIndex >= this.items.length) nextIndex = 0;
-            count++;
-        } while (this.items[nextIndex].selectable === false && count < this.items.length);
+    // Re-align the controller cursor with the model's selectedIndex after a menu
+    // transition (or a mouse move / click), so the next scan continues from there.
+    seatScan() {
+        if (!this.scan) return;
+        const selectable = this.getSelectableItems();
+        const current = this.items[this.selectedIndex];
+        const i = selectable.indexOf(current);
+        this.scan.setIndex(i >= 0 ? i : -1);
+    }
 
-        if (count < this.items.length) {
-            this.selectedIndex = nextIndex;
-            this.render();
-            
-            // Announce selection via TTS
-            const item = this.items[this.selectedIndex];
-            let text = typeof item.text === 'function' ? item.text() : item.text;
-            
-            // Strip HTML tags for TTS
-            text = text.replace(/<[^>]*>/g, '');
-            
-            AudioSys.speak(text);
+    // Pick up a changed scan speed (reverse cadence + auto-scan interval).
+    refreshScan() {
+        if (this.scan && this._active) {
+            this.scan.reverseCadenceMs = this.getScanInterval();
+            this.scan.start();
         }
+    }
+
+    onScanFocus(item) {
+        const idx = this.items.indexOf(item);
+        if (idx !== -1) this.selectedIndex = idx;
+        this.render();
+    }
+
+    onScanAnnounce(item) {
+        let text = typeof item.text === 'function' ? item.text() : item.text;
+        // Strip HTML tags for TTS
+        text = String(text).replace(/<[^>]*>/g, '');
+        AudioSys.speak(text);
+    }
+
+    onScanSelect(item) {
+        if (item && item.selectable !== false && typeof item.action === 'function') {
+            item.action();
+        }
+    }
+
+    handleInput(event) {
+        // Menu scan / select is owned by the shared ScanController (see
+        // setupScanController); keyboard SCAN_NEXT / SCAN_PREV / SELECT are handled
+        // there directly. Retained for the game's event routing; mouse selection
+        // still flows through selectItem().
     }
 
     selectItem() {
@@ -164,6 +241,7 @@ class MenuSystem {
         this.items = this.menus['MAIN_MENU'];
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("Benny's Mini Golf");
     }
 
@@ -172,6 +250,7 @@ class MenuSystem {
         this.items = this.menus['PAUSE_MENU'];
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("Paused");
     }
 
@@ -192,6 +271,7 @@ class MenuSystem {
         this.items = this.menus['SETTINGS'];
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("Settings");
     }
 
@@ -203,6 +283,7 @@ class MenuSystem {
         if (this.selectedIndex === -1) this.selectedIndex = 0;
         
         this.render();
+        this.seatScan();
         AudioSys.speak("Instructions. Spacebar to Aim. Enter to Charge and Putt. Settings to change Aimer Style and Thickness, Ball color and other stuff. Casual Mode: try to get the least strokes possible. Challenge Mode: you must complete each hole within the PAR or the course will reset fully. Multiplayer: Play casually with friends. Be careful! You can knock others balls into hazards!");
     }
 
@@ -219,6 +300,7 @@ class MenuSystem {
         ];
         this.selectedIndex = 1; // Default to Proceed
         this.render();
+        this.seatScan();
         AudioSys.speak("Warning. Loading a custom course requires mouse input.");
     }
 
@@ -255,6 +337,7 @@ class MenuSystem {
         ];
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("Select Game Mode");
     }
 
@@ -268,6 +351,7 @@ class MenuSystem {
         ];
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("How many players?");
     }
 
@@ -335,6 +419,7 @@ class MenuSystem {
         
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak(`Player ${playerIndex + 1}, choose color`);
     }
 
@@ -397,6 +482,7 @@ class MenuSystem {
         
         this.selectedIndex = 0;
         this.render();
+        this.seatScan();
         AudioSys.speak("Select Course. " + this.availableCourses[this.selectedCourseIndex].name);
     }
 
@@ -408,6 +494,12 @@ class MenuSystem {
 
     exitGame() {
         AudioSys.speak("Exiting to Hub");
+        // Prefer the shared Nav module (hub iframe contract); keep the legacy
+        // postMessage / navigation below as a fallback for older shells.
+        if (typeof window !== 'undefined' && window.Nav && typeof window.Nav.goBack === 'function') {
+            window.Nav.goBack();
+            return;
+        }
         try {
             // Try to message parent window to focus the back button
             if (window.parent && window.parent !== window) {
@@ -440,7 +532,7 @@ class MenuSystem {
             NarbeScanManager.cycleScanSpeed();
             this.render();
             AudioSys.speak("Scan Speed " + this.getScanSpeedLabel());
-            this.updateAutoScan();
+            this.refreshScan();
         }
     }
 
@@ -457,33 +549,13 @@ class MenuSystem {
              NarbeScanManager.updateSettings({ autoScan: !current });
              this.render();
              AudioSys.speak("Auto Scan " + (this.getAutoScanLabel()));
-             this.updateAutoScan();
-        }
-    }
-
-    updateAutoScan() {
-        if (this.autoScanTimer) clearInterval(this.autoScanTimer);
-        this.autoScanTimer = null;
-        
-        if (typeof NarbeScanManager !== 'undefined') {
-            const settings = NarbeScanManager.getSettings();
-            if (settings.autoScan) {
-                const interval = NarbeScanManager.getScanInterval();
-                this.autoScanTimer = setInterval(() => {
-                    // Only scan if not handling other interactions?
-                    // Basic safeguard
-                    if (this.active && document.visibilityState === 'visible') {
-                        this.moveSelection(1);
-                    }
-                }, interval);
-            }
+             this.refreshScan();
         }
     }
 
     render() {
         if (!this.active) {
             this.uiLayer.innerHTML = '';
-            if (this.autoScanTimer) { clearInterval(this.autoScanTimer); this.autoScanTimer = null; }
             return;
         }
 
@@ -516,8 +588,6 @@ class MenuSystem {
 
         html += `</div></div>`;
         this.uiLayer.innerHTML = html;
-        
-        this.updateAutoScan();
     }
 
     showCourseCreatorWarning() {
@@ -644,4 +714,8 @@ class MenuSystem {
 
         AudioSys.speak(el.innerText);
     }
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = MenuSystem;
 }
