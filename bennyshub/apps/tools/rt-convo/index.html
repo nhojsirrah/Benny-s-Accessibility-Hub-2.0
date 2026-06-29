@@ -605,6 +605,7 @@
 <script src="../../../shared/voice-manager.js"></script>
 <script src="../../../shared/ios-audio-fix.js"></script>
 <script src="../../../shared/scan-manager.js"></script>
+<script src="../../../shared/nav.js"></script>
 
 <script>
 (() => {
@@ -1460,7 +1461,10 @@ ${profanityInstruction()}`;
     teardownGoogleSTTMic();
     if (window.electronAPI?.speech) window.electronAPI.speech.stop();
     if (window.parent !== window) {
-      // Running in hub iframe
+      // Running in hub iframe — leave via the shared Nav contract (postMessage
+      // {action:'closeApp'}; the hub treats closeApp and focusBackButton
+      // identically). Keep the legacy focusBackButton post as a fallback.
+      if (window.Nav && window.Nav.goBack()) return;
       window.parent.postMessage({ action: 'focusBackButton' }, '*');
     } else if (window.electronAPI?.closeToolWindow) {
       // Running as a standalone tool BrowserWindow

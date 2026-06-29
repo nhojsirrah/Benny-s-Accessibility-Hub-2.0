@@ -287,6 +287,9 @@
   function exitHub() {
     speak('Back to hub');
     if (window.parent && window.parent !== window) {
+      // Leave via the shared Nav contract (postMessage {action:'closeApp'} to the
+      // hub when framed — the exact message kept as the legacy fallback below).
+      if (window.Nav && window.Nav.goBack()) return;
       window.parent.postMessage({ action: 'closeApp' }, '*');
     }
   }
