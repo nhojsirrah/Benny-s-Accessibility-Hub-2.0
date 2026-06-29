@@ -1300,6 +1300,12 @@
                 this.autoScanTimer = null;
                 this.returnToId = 'start';
 
+                // Shared <benny-pause-overlay> instance for the pause menu. Stays
+                // null when window.BennyPauseOverlay is unavailable (the game then
+                // falls back to the bespoke #pause-screen markup). Built lazily the
+                // first time the menu is paused.
+                this.pauseOverlay = null;
+
                 // --- Shared ScanController menu model -------------------------
                 // The MENU / settings (single-axis list) scanning is driven by
                 // the shared ScanController (shared/scan-core.js), used here as a
@@ -1316,18 +1322,35 @@
                 // that set activeIndex directly are honored.
                 this.menuScan = (typeof window !== 'undefined' && window.ScanController)
                     ? new window.ScanController({
-                        getTargets: () => this.currentMenu
-                            ? Array.from(this.currentMenu.getElementsByClassName('menu-item'))
-                            : [],
+                        getTargets: () => {
+                            // While the shared pause overlay is open it owns the
+                            // scan targets; otherwise scan the active menu's items.
+                            if (this.pauseOverlayActive()) return this.pauseOverlay.getTargets();
+                            return this.currentMenu
+                                ? Array.from(this.currentMenu.getElementsByClassName('menu-item'))
+                                : [];
+                        },
                         onFocus: (el, index) => {
                             this.activeIndex = index;
+                            if (this.pauseOverlayActive()) {
+                                this.highlightOverlayTarget(el);
+                                return;
+                            }
                             this.updateVisuals();
                         },
-                        onAnnounce: () => {
+                        onAnnounce: (el) => {
                             audio.playBeep(200);
+                            if (this.pauseOverlayActive()) {
+                                this.speakOverlayTarget(el);
+                                return;
+                            }
                             this.speakSelection();
                         },
                         onSelect: (el, index) => {
+                            if (this.pauseOverlayActive()) {
+                                if (el) this.pauseOverlay.activate(el);
+                                return;
+                            }
                             if (!el || index < 0) return;
                             this.handleAction(el.dataset.action, el);
                         },
@@ -1559,6 +1582,7 @@
                         } else {
                             this.returnToId = 'start';
                         }
+                        this.hidePauseOverlay();
                         
                         document.querySelectorAll('.screen').forEach(s => s.style.display='none');
                         document.getElementById('settings-screen').style.display = 'flex';
@@ -1679,9 +1703,13 @@
                         audio.speak("Back");
                         
                         if (this.returnToId === 'pause') {
-                             document.getElementById('pause-screen').style.display = 'flex';
-                             this.setActiveMenu('pause');
                              gameState = 'PAUSED';
+                             // Prefer the shared overlay; fall back to the bespoke
+                             // pause screen when the module is unavailable.
+                             if (!this.showSharedPauseOverlay()) {
+                                 document.getElementById('pause-screen').style.display = 'flex';
+                                 this.setActiveMenu('pause');
+                             }
                         } else {
                              document.getElementById('start-screen').style.display = 'flex';
                              this.setActiveMenu('start');
@@ -1690,6 +1718,7 @@
                         break;
 
                     case 'resume':
+                        this.hidePauseOverlay();
                         document.getElementById('pause-screen').style.display = 'none';
                         audio.speak("Resume Game");
                         gameState = 'AIMING'; 
@@ -1700,11 +1729,13 @@
                         break;
                     case 'restart':
                         this.stopAutoScan(); // Ensure menu scan stops
+                        this.hidePauseOverlay();
                         document.querySelectorAll('.screen').forEach(s => s.style.display='none');
                         audio.speak("Restarting Game");
                         resetGame();
                         break;
                     case 'menu':
+                        this.hidePauseOverlay();
                         document.querySelectorAll('.screen').forEach(s => s.style.display='none');
                         document.getElementById('start-screen').style.display = 'flex';
                         audio.speak("Main Menu");
@@ -1727,10 +1758,106 @@
                 } else {
                     // Pause
                     gameState = 'PAUSED';
-                    document.getElementById('pause-screen').style.display = 'flex';
-                    this.setActiveMenu('pause');
+                    // Prefer the shared <benny-pause-overlay>; fall back to the
+                    // bespoke #pause-screen markup when it is unavailable.
+                    if (!this.showSharedPauseOverlay()) {
+                        document.getElementById('pause-screen').style.display = 'flex';
+                        this.setActiveMenu('pause');
+                    }
                     audio.speak("Paused");
                 }
+            }
+
+            // True while the shared overlay owns the pause menu (vs the bespoke
+            // #pause-screen fallback). Guards every overlay-specific branch so the
+            // pre-migration path runs unchanged when the module is absent.
+            pauseOverlayActive() {
+                return !!(this.pauseOverlay && this.pauseOverlay.isOpen());
+            }
+
+            // Build the overlay's action list from the bespoke #pause-menu-list so
+            // the labels and handlers stay verbatim (Continue Game / Restart Game /
+            // Settings / Main Menu). Each action routes to the same handleAction.
+            buildPauseActions() {
+                const list = this.screens ? this.screens['pause'] : null;
+                const items = list
+                    ? Array.from(list.getElementsByClassName('menu-item'))
+                    : [];
+                return items.map((el) => ({
+                    id: el.dataset.action,
+                    label: el.innerText || el.textContent,
+                    onSelect: () => this.handleAction(el.dataset.action, el),
+                }));
+            }
+
+            // Open the pause menu through the shared <benny-pause-overlay>. The
+            // game's ScanController still drives stepping / selection (getTargets
+            // routes at the overlay's buttons while open; onSelect runs activate).
+            // Returns false when the shared module is unavailable so the caller can
+            // fall back to the bespoke markup.
+            showSharedPauseOverlay() {
+                if (typeof window === 'undefined' || !window.BennyPauseOverlay) {
+                    return false;
+                }
+                // Keep the bespoke pause screen hidden so only one pause UI shows.
+                const legacy = document.getElementById('pause-screen');
+                if (legacy) legacy.style.display = 'none';
+
+                const actions = this.buildPauseActions();
+                if (!this.pauseOverlay) {
+                    this.pauseOverlay = window.BennyPauseOverlay.create({
+                        actions,
+                        scanManager: window.NarbeScanManager,
+                        voice: window.NarbeVoiceManager,
+                    });
+                } else {
+                    this.pauseOverlay.setActions(actions);
+                }
+                this.pauseOverlay.show();
+
+                // Seat the scan on the first action. currentMenu stays the (hidden)
+                // pause list as a non-null sentinel for scanNext / startAutoScan;
+                // the overlay-aware getTargets returns the overlay buttons.
+                this.currentMenu = this.screens ? this.screens['pause'] : null;
+                this.activeIndex = 0;
+                if (this.menuScan) this.menuScan.setIndex(0);
+                const targets = this.pauseOverlay.getTargets();
+                this.highlightOverlayTarget(targets[0]);
+                this.startAutoScan();
+                return true;
+            }
+
+            // Hide the shared overlay if it is open (no-op otherwise).
+            hidePauseOverlay() {
+                if (this.pauseOverlay && this.pauseOverlay.isOpen()) {
+                    this.pauseOverlay.hide();
+                }
+            }
+
+            // Reflect the current scan position on the overlay WITHOUT moving DOM
+            // focus: focusing an overlay button would let the overlay's own key
+            // handler hijack Space / Enter (it treats them as select). Mirrors the
+            // shared overlay's yellow focus look via inline styles instead.
+            highlightOverlayTarget(el) {
+                if (!this.pauseOverlay) return;
+                this.pauseOverlay.getTargets().forEach((b) => {
+                    b.classList.remove('selected');
+                    b.style.borderColor = '';
+                    b.style.boxShadow = '';
+                });
+                if (el) {
+                    el.classList.add('selected');
+                    el.style.borderColor = '#ffeb3b';
+                    el.style.boxShadow = '0 0 0 4px rgba(255,235,59,0.6)';
+                }
+            }
+
+            // Speak the focused overlay button's label (TTS parity with the bespoke
+            // menu's speakSelection).
+            speakOverlayTarget(el) {
+                if (!el) return;
+                const text = el.getAttribute('aria-label') || el.textContent || '';
+                if (text) audio.speak(text);
             }
         }
         
@@ -2335,6 +2462,7 @@
                 GameSettings,
                 getScan: () => MenuManager.menuScan,
                 getMenu: () => MenuManager,
+                getPauseOverlay: () => MenuManager.pauseOverlay,
                 setGameState: (s) => { gameState = s; },
                 getGameState: () => gameState,
                 getState: () => ({
