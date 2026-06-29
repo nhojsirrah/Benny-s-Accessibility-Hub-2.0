@@ -14,34 +14,70 @@ const state = {
         theme: 'Default', // Default, Dark, Pastel, Neon, High Contrast
         autoScan: false,
         voiceIndex: 0,
-        gamesSource: localStorage.getItem('trivia_games_source') || 'ALL'
+        gamesSource: loadGamesSource()
     },
-    scanTimer: null,
-    currentIndex: -1,
-    activeElements: [],
     isPaused: false,
     audioContext: null,
     gameStartTime: 0,
     questionStartTime: 0,
     categoryPage: 0,
-    previousScreen: null, // To track where to go back from settings
-    inputState: {
-        spaceDownTime: 0,
-        enterDownTime: 0,
-        longPressThreshold: 3000, // 3 seconds
-        repeatInterval: 2000,     // 2 seconds
-        spaceTimer: null,
-        spaceInterval: null,
-        enterTimer: null,
-        spaceLongTriggered: false,
-        enterLongTriggered: false
-    }
+    previousScreen: null // To track where to go back from settings
 };
+
+// Shared single-switch scanning controller (shared/scan-core.js). Created in
+// setupScan() during init(); all scan movement/selection flows through it.
+let scan = null;
 
 // Constants
 // Note: Scan speeds are now managed by NarbeScanManager
 
 const THEMES = ['Default', 'Dark', 'Pastel', 'Neon', 'High Contrast'];
+
+// --- Settings persistence (shared SettingsStore) -------------------------
+//
+// SettingsStore (shared/settings-store.js) is the canonical typed settings
+// store. Trivia's only app-specific persisted preference is the games-source
+// filter ('ALL' | 'Local' | 'Online'). The shared per-app schema for
+// 'triviamaster' lives in shared/settings-store.js and is OUT OF SCOPE for this
+// app-only PR; until a `triviamaster` schema entry is added there, the typed
+// per-app store would reject the unschemaed key. We therefore use a
+// schema-aware accessor: when the shared schema gains a `gamesSource` slot the
+// value round-trips through SettingsStore.app('triviamaster'); until then it
+// falls back to the original `trivia_games_source` localStorage key so behavior
+// is exactly preserved. The legacy key is always kept in sync, so the adoption
+// is forward-compatible with zero data loss.
+function triviaSettingsStore() {
+    const ss = (typeof window !== 'undefined') ? window.SettingsStore : undefined;
+    if (ss && ss.APP_SCHEMAS && ss.APP_SCHEMAS.triviamaster &&
+        Object.prototype.hasOwnProperty.call(ss.APP_SCHEMAS.triviamaster, 'gamesSource') &&
+        typeof ss.app === 'function') {
+        return ss.app('triviamaster');
+    }
+    return null;
+}
+
+function loadGamesSource() {
+    const store = triviaSettingsStore();
+    if (store) {
+        const v = store.get('gamesSource');
+        if (v !== undefined) return v;
+    }
+    try {
+        return localStorage.getItem('trivia_games_source') || 'ALL';
+    } catch (e) {
+        return 'ALL';
+    }
+}
+
+function saveGamesSource(value) {
+    const store = triviaSettingsStore();
+    if (store) store.set('gamesSource', value);
+    try {
+        localStorage.setItem('trivia_games_source', value);
+    } catch (e) {
+        /* ignore storage failures */
+    }
+}
 
 const CATS_PAGE_FIRST = 5;
 const CATS_PAGE_OTHER = 6;
@@ -135,6 +171,9 @@ const header = document.getElementById('game-header');
 
 // Initialization
 async function init() {
+    // Create + attach the shared ScanController before any scanning calls.
+    setupScan();
+
     // Scan Manager Integration
     if (window.NarbeScanManager) {
         // Initial sync
@@ -275,16 +314,9 @@ function getScannables() {
 }
 
 function startScanning() {
-    if (state.scanTimer) clearInterval(state.scanTimer);
-    if (state.settings.autoScan) {
-        let speed = 2000;
-        if (window.NarbeScanManager) {
-            speed = window.NarbeScanManager.getScanInterval();
-        }
-        state.scanTimer = setInterval(scanNext, speed);
-    } else {
-        state.scanTimer = null;
-    }
+    // Auto-scan cadence + enabled-state come from NarbeScanManager via the
+    // ScanController; start() (re)phases the auto-scan timer accordingly.
+    if (scan) scan.start();
 }
 
 function restoreQuestionMedia() {
@@ -469,180 +501,105 @@ function updateImagePopup(el) {
 }
 
 function resetScanning() {
-    // Remove highlight from current
-    if (state.activeElements[state.currentIndex]) {
-        state.activeElements[state.currentIndex].classList.remove('scanned');
-    }
-    
+    // Clear any existing highlight and hide the answer/media popup, then reset
+    // the controller cursor so the next advance lands on the first target.
+    document.querySelectorAll('.scanned').forEach(el => el.classList.remove('scanned'));
+
     updateImagePopup(null); // Hide popup
 
-    state.activeElements = getScannables();
-    state.currentIndex = -1;
-    
-    // Restart timer
-    startScanning();
+    if (scan) {
+        scan.setIndex(-1);
+        scan.stop();
+        scan.start();
+    }
 }
 
-function scanNext() {
-    if (state.activeElements.length === 0) {
-        state.activeElements = getScannables();
-        if (state.activeElements.length === 0) return;
+// --- Shared ScanController integration ------------------------------------
+//
+// All switch-scanning (menu, answer choices, settings, overlays) is driven by
+// the shared ScanController (shared/scan-core.js). getScannables() supplies the
+// single-axis targets (re-read each move so it adapts to the active screen).
+// onScanFocus reuses the original highlight + scroll + popup + scan beep;
+// onScanAnnounce reuses speak(); selectTarget runs the original answer/menu
+// click logic. The auto-pause-on-media/question and resume-on-select behaviors
+// are app-bound and preserved below.
+function setupScan() {
+    if (!window.ScanController) {
+        console.error("ScanController not loaded — scanning will be unavailable.");
+        return;
     }
 
-    // Remove prev highlight
-    if (state.currentIndex >= 0 && state.currentIndex < state.activeElements.length) {
-        state.activeElements[state.currentIndex].classList.remove('scanned');
+    scan = new window.ScanController({
+        getTargets: getScannables,
+        onBlur: (el) => { if (el) el.classList.remove('scanned'); },
+        onFocus: onScanFocus,
+        onAnnounce: onScanAnnounce,
+        onSelect: selectTarget,
+        onPause: () => { togglePause(); },
+        wrap: true,
+        spaceHoldMs: 3000,      // original longPressThreshold: hold Space -> reverse
+        reverseCadenceMs: 2000, // original repeatInterval: reverse repeats every 2s
+        enterHoldMs: 3000,      // original longPressThreshold: hold Enter -> pause menu
+        // The original Trivia game had NO anti-tremor/min-press gate, so the
+        // debounce floors stay OFF to preserve behavior exactly.
+        minPressMs: 0,
+        minSelectMs: 0,
+        minIntervalMs: 0,
+        scanManager: window.NarbeScanManager,
+        voice: window.NarbeVoiceManager,
+    });
+    scan.attach(document);
+}
+
+function onScanFocus(el) {
+    if (!el) return;
+    el.classList.add('scanned');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    audio.playScan();
+
+    updateImagePopup(el); // Show popup if image
+
+    // Auto-Pause on Media Container or Question Text (preserved from the
+    // original scanNext): when auto-scanning, halt on these so the user can
+    // view/hear them; selecting resumes (see selectTarget).
+    if (state.settings.autoScan && (el.id === 'media-container' || el.id === 'question-text-wrapper')) {
+        if (scan) scan.stop();
     }
+}
 
-    // Move next
-    state.currentIndex++;
-    if (state.currentIndex >= state.activeElements.length) {
-        state.currentIndex = 0;
-    }
+function onScanAnnounce(el) {
+    // TTS for the scanned item (matches the original scanNext announcement).
+    const text = el ? (el.innerText || el.getAttribute('aria-label') || "Button") : "Button";
+    speak(text);
+}
 
-    // Highlight new
-    const el = state.activeElements[state.currentIndex];
-    if (el) {
-        el.classList.add('scanned');
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        audio.playScan();
-        
-        updateImagePopup(el); // Show popup if image
+function selectTarget(el) {
+    if (!el) return;
 
-        // TTS for scanned item
-        const text = el.innerText || el.getAttribute('aria-label') || "Button";
-        speak(text);
+    // Resume scanning if auto-paused on media or question (preserved from the
+    // original selectCurrent).
+    if (state.settings.autoScan && (el.id === 'media-container' || el.id === 'question-text-wrapper')) {
+        scan.advance();
 
-        // Auto-Pause on Media Container or Question Text
-        if (state.settings.autoScan && (el.id === 'media-container' || el.id === 'question-text-wrapper')) {
-            if (state.scanTimer) clearInterval(state.scanTimer);
-            state.scanTimer = null; // Explicitly nullify to ensure we know it's stopped
+        // Only resume auto-scan if the NEXT item isn't also a pause target.
+        const nextEl = scan.getCurrentTarget();
+        if (nextEl && (nextEl.id === 'media-container' || nextEl.id === 'question-text-wrapper')) {
+            scan.stop();
+        } else {
+            startScanning();
         }
-    }
-}
-
-function scanPrev() {
-    if (state.activeElements.length === 0) {
-        state.activeElements = getScannables();
-        if (state.activeElements.length === 0) return;
+        return;
     }
 
-    // Remove prev highlight
-    if (state.currentIndex >= 0 && state.currentIndex < state.activeElements.length) {
-        state.activeElements[state.currentIndex].classList.remove('scanned');
-    }
-
-    // Move prev
-    state.currentIndex--;
-    if (state.currentIndex < 0) {
-        state.currentIndex = state.activeElements.length - 1;
-    }
-
-    // Highlight new
-    const el = state.activeElements[state.currentIndex];
-    if (el) {
-        el.classList.add('scanned');
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        audio.playScan();
-        
-        updateImagePopup(el); // Show popup if image
-
-        // TTS for scanned item
-        const text = el.innerText || el.getAttribute('aria-label') || "Button";
-        speak(text);
-    }
-}
-
-function selectCurrent() {
-    if (state.currentIndex >= 0 && state.currentIndex < state.activeElements.length) {
-        const el = state.activeElements[state.currentIndex];
-
-        // Resume scanning if paused on media or question
-        // Check if we are actually paused (scanTimer is null) OR if we just hit one of these items
-        if (state.settings.autoScan && (el.id === 'media-container' || el.id === 'question-text-wrapper')) {
-            scanNext();
-            
-            // Only start scanning if the NEXT item isn't also a pause target
-            const nextEl = state.activeElements[state.currentIndex]; // scanNext updated currentIndex
-            if (nextEl && (nextEl.id === 'media-container' || nextEl.id === 'question-text-wrapper')) {
-                // Do not start scanning, we want to pause on this new item too
-                // Ensure timer is cleared just in case scanNext didn't do it (it should have)
-                if (state.scanTimer) clearInterval(state.scanTimer);
-                state.scanTimer = null;
-            } else {
-                startScanning();
-            }
-            return;
-        }
-
-        audio.playSelect();
-        el.click();
-    }
+    audio.playSelect();
+    el.click();
 }
 
 // Input Handling
 function setupEventListeners() {
-    document.addEventListener('keydown', (e) => {
-        if (e.repeat) return; // Ignore auto-repeat
-
-        if (e.code === 'Space') {
-            e.preventDefault();
-            state.inputState.spaceDownTime = Date.now();
-            
-            // Start timer for long press (3s)
-            state.inputState.spaceTimer = setTimeout(() => {
-                // Long press detected
-                state.inputState.spaceLongTriggered = true;
-                
-                // Stop auto-scan while manually scanning backwards
-                if (state.scanTimer) clearInterval(state.scanTimer);
-
-                scanPrev(); // Initial backward scan
-                
-                // Start repeating backward scan every 2s
-                state.inputState.spaceInterval = setInterval(() => {
-                    scanPrev();
-                }, state.inputState.repeatInterval);
-                
-            }, state.inputState.longPressThreshold);
-
-        } else if (e.code === 'Enter') {
-            e.preventDefault();
-            state.inputState.enterDownTime = Date.now();
-            
-            // Start timer for long press (3s)
-            state.inputState.enterTimer = setTimeout(() => {
-                // Long press detected - Open Pause Menu immediately
-                state.inputState.enterLongTriggered = true;
-                togglePause();
-            }, state.inputState.longPressThreshold);
-        }
-    });
-
-    document.addEventListener('keyup', (e) => {
-        if (e.code === 'Space') {
-            e.preventDefault();
-            clearTimeout(state.inputState.spaceTimer);
-            clearInterval(state.inputState.spaceInterval);
-            
-            if (!state.inputState.spaceLongTriggered) {
-                // Short press - Scan Forward
-                scanNext();
-            }
-            startScanning(); // Reset/Resume auto scan timer if active
-            state.inputState.spaceLongTriggered = false;
-
-        } else if (e.code === 'Enter') {
-            e.preventDefault();
-            clearTimeout(state.inputState.enterTimer);
-            
-            if (!state.inputState.enterLongTriggered) {
-                // Short press - Select
-                selectCurrent();
-            }
-            state.inputState.enterLongTriggered = false;
-        }
-    });
+    // Switch input (Space scan / Enter select, hold-to-reverse, hold-to-pause,
+    // NumpadEnter) is handled by the shared ScanController attached in
+    // setupScan(). Only the click delegation remains here.
 
     // Click handlers for all interactive elements (delegation)
     document.body.addEventListener('click', (e) => {
@@ -680,7 +637,10 @@ function setupEventListeners() {
         } else if (action === 'exit-game') {
             speak("Exiting to Hub");
             setTimeout(() => {
-                if (window.parent && window.parent !== window) {
+                // Canonical hub back-contract via the shared Nav module.
+                if (window.Nav && typeof window.Nav.goBack === 'function') {
+                    window.Nav.goBack();
+                } else if (window.parent && window.parent !== window) {
                     window.parent.postMessage({ action: 'focusBackButton' }, '*');
                 } else {
                     window.location.href = '../../../index.html';
@@ -723,7 +683,7 @@ function setupEventListeners() {
             const sources = ['ALL', 'Local', 'Online'];
             const idx = sources.indexOf(state.settings.gamesSource);
             state.settings.gamesSource = sources[(idx + 1) % sources.length];
-            localStorage.setItem('trivia_games_source', state.settings.gamesSource);
+            saveGamesSource(state.settings.gamesSource);
             updateSettingsUI();
         } else if (action === 'toggle-autoscan') {
             if (window.NarbeScanManager) {
@@ -1488,11 +1448,11 @@ function loadQuestion() {
     state.questionStartTime = Date.now();
     resetScanning();
 
-    // Start scanning on the Question Text immediately
-    const qIndex = state.activeElements.findIndex(el => el.id === 'question-text-wrapper');
-    if (qIndex !== -1) {
-        state.currentIndex = qIndex - 1;
-        scanNext();
+    // Start scanning on the Question Text immediately.
+    const targets = getScannables();
+    const qIndex = targets.findIndex(el => el.id === 'question-text-wrapper');
+    if (qIndex !== -1 && scan) {
+        scan.focusIndex(qIndex);
     }
 }
 
@@ -1680,7 +1640,7 @@ function togglePause() {
     
     if (state.isPaused) {
         overlay.classList.remove('hidden');
-        clearInterval(state.scanTimer);
+        if (scan) scan.stop();
         speak("Game Paused");
     } else {
         overlay.classList.add('hidden');
@@ -1690,14 +1650,38 @@ function togglePause() {
     resetScanning();
 }
 
-// Start
-// loadLocalPersistedGames().then(async () => {
-    // await loadManifestGames();
-    // init();
-// });
-// New Start Logic: Just Init, let loadGamesList handle display
-init();
-loadGamesList();
+// Start. Skipped under CommonJS/test (module.exports is a truthy {}), so jsdom
+// tests can require() this file headless and drive it directly.
+if (typeof module === 'undefined' || !module.exports) {
+    init();
+    loadGamesList();
+}
+
+// CommonJS export surface for jsdom tests (no-op in the browser).
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        getScan: () => scan,
+        setupScan,
+        init,
+        getScannables,
+        onScanFocus,
+        onScanAnnounce,
+        selectTarget,
+        startScanning,
+        resetScanning,
+        togglePause,
+        showScreen,
+        startGame,
+        loadQuestion,
+        handleAnswer,
+        loadCategories,
+        loadGamesSource,
+        saveGamesSource,
+        getState: () => state,
+        getTriviaData: () => TRIVIA_DATA,
+        setTriviaData: (d) => { TRIVIA_DATA = d; },
+    };
+}
 
 function getYouTubeId(url) {
     const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=|shorts\/)([^#&?]*).*/;
