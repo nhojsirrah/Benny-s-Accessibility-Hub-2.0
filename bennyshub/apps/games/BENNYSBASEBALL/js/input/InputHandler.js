@@ -5,6 +5,16 @@ class InputHandler {
         this.selectedPlayerIndex = -1; // Track selected field player for scanning
         this.backwardScanInterval = null; // Track backward scan interval
         this.autoScanInterval = null; // Auto scan timer
+
+        // Shared ScanController menu engine (shared/scan-core.js via menuScan.js).
+        // Drives the single-axis MENU cursor + selection; gameplay scanning
+        // (pitch grid, interactive batting, fielder scan) stays on this handler.
+        // Null when the shared module is unavailable (fallback to the original
+        // inline behavior below).
+        this.menuScan = (typeof window !== 'undefined' && window.createBaseballMenuScan)
+            ? window.createBaseballMenuScan(this.game)
+            : null;
+
         this.setupEventListeners();
         
         // Subscribe to scan manager settings changes
@@ -70,6 +80,39 @@ class InputHandler {
         this.startAutoScan();
     }
 
+    // Scan / select key predicates via the shared ScanController (so NumpadEnter
+    // selects identically to Enter), with a fallback for when it is unavailable.
+    isScanKey(e) {
+        return this.menuScan ? this.menuScan.scan.isScan(e) : (e.code === 'Space' || e.key === ' ');
+    }
+
+    isSelectKey(e) {
+        return this.menuScan ? this.menuScan.scan.isSelect(e) : (e.code === 'Enter' || e.code === 'NumpadEnter' || e.key === 'Enter');
+    }
+
+    // Advance / step-back the MENU cursor through the shared ScanController when
+    // available, falling back to the original wrap math otherwise. Gameplay scan
+    // modes (BATTING / PITCHING / GAMEPLAY) keep their own handlers.
+    menuScanAdvance() {
+        if (this.menuScan && this.menuScan.isMenuMode()) {
+            this.menuScan.advance();
+            return;
+        }
+        const gs = this.game.gameState;
+        const len = gs.mode === GAME_CONSTANTS.MODES.COLOR_SELECT ? 2 : gs.menuOptions.length;
+        gs.selectedIndex = (gs.selectedIndex + 1) % len;
+    }
+
+    menuScanBack() {
+        if (this.menuScan && this.menuScan.isMenuMode()) {
+            this.menuScan.back();
+            return;
+        }
+        const gs = this.game.gameState;
+        const len = gs.mode === GAME_CONSTANTS.MODES.COLOR_SELECT ? 2 : gs.menuOptions.length;
+        gs.selectedIndex = gs.selectedIndex <= 0 ? len - 1 : gs.selectedIndex - 1;
+    }
+
     performAutoScan() {
         // Don't auto scan if inputs are blocked
         if (this.game.gameState.playInProgress || this.game.gameState.inputsBlocked) return;
@@ -86,13 +129,13 @@ class InputHandler {
     }
 
     handleKeyDown(e) {
-        if (this.keyStates[e.key]) return;
-        this.keyStates[e.key] = true;
+        if (this.keyStates[e.code]) return;
+        this.keyStates[e.code] = true;
 
         // Reset auto scan on interaction
         this.restartAutoScan();
 
-        if (e.key === ' ') {
+        if (this.isScanKey(e)) {
             e.preventDefault();
             this.game.gameState.spaceHeld = true;
             this.game.gameState.spaceHoldStart = Date.now();
@@ -101,7 +144,7 @@ class InputHandler {
             this.checkBackwardScanDuringHold();
         }
 
-        if (e.key === 'Enter') {
+        if (this.isSelectKey(e)) {
             e.preventDefault();
             this.game.gameState.returnHeld = true;
             this.game.gameState.returnHoldStart = Date.now();
@@ -218,12 +261,12 @@ class InputHandler {
     }
 
     handleKeyUp(e) {
-        this.keyStates[e.key] = false;
+        this.keyStates[e.code] = false;
 
         // Ensure auto scan resumes after interaction
         this.startAutoScan();
 
-        if (e.key === ' ') {
+        if (this.isScanKey(e)) {
             e.preventDefault();
             this.game.gameState.spaceHeld = false;
             
@@ -240,7 +283,7 @@ class InputHandler {
             // If we were backward scanning, do nothing - just stay on current selection
         }
 
-        if (e.key === 'Enter') {
+        if (this.isSelectKey(e)) {
             e.preventDefault();
             this.game.gameState.returnHeld = false;
             // Note: returnHoldStart is reset in handleEnterRelease for accurate duration calculation
@@ -295,35 +338,35 @@ class InputHandler {
 
     handleMainMenuScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % gameState.menuOptions.length;
+        this.menuScanAdvance();
         this.game.menuSystem.drawMainMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handlePlayMenuScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % gameState.menuOptions.length;
+        this.menuScanAdvance();
         this.game.menuSystem.drawPlayMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleSettingsMenuScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % gameState.menuOptions.length;
+        this.menuScanAdvance();
         this.game.menuSystem.drawSettingsMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleResetConfirmationScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % gameState.menuOptions.length;
+        this.menuScanAdvance();
         this.game.menuSystem.drawResetConfirmation();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleColorSelectScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % 2;
+        this.menuScanAdvance();
         
         this.game.menuSystem.drawColorSelectMenu();
         
@@ -419,7 +462,7 @@ class InputHandler {
 
     handlePauseMenuScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = (gameState.selectedIndex + 1) % gameState.menuOptions.length;
+        this.menuScanAdvance();
         
         // Check which pause menu is currently visible
         const pauseMenu = document.getElementById('pauseMenu');
@@ -442,43 +485,35 @@ class InputHandler {
 
     handleMainMenuBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 
-            gameState.menuOptions.length - 1 : 
-            gameState.selectedIndex - 1;
+        this.menuScanBack();
         this.game.menuSystem.drawMainMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handlePlayMenuBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 
-            gameState.menuOptions.length - 1 : 
-            gameState.selectedIndex - 1;
+        this.menuScanBack();
         this.game.menuSystem.drawPlayMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleSettingsMenuBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 
-            gameState.menuOptions.length - 1 : 
-            gameState.selectedIndex - 1;
+        this.menuScanBack();
         this.game.menuSystem.drawSettingsMenu();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleResetConfirmationBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 
-            gameState.menuOptions.length - 1 : 
-            gameState.selectedIndex - 1;
+        this.menuScanBack();
         this.game.menuSystem.drawResetConfirmation();
         this.game.audioSystem.speak(gameState.menuOptions[gameState.selectedIndex]);
     }
 
     handleColorSelectBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 1 : 0;
+        this.menuScanBack();
         
         this.game.menuSystem.drawColorSelectMenu();
         
@@ -558,9 +593,7 @@ class InputHandler {
 
     handlePauseMenuBackwardScan() {
         const gameState = this.game.gameState;
-        gameState.selectedIndex = gameState.selectedIndex <= 0 ? 
-            gameState.menuOptions.length - 1 : 
-            gameState.selectedIndex - 1;
+        this.menuScanBack();
         
         // Check which pause menu is currently visible
         const pauseMenu = document.getElementById('pauseMenu');
@@ -616,6 +649,13 @@ class InputHandler {
             const selectedOption = this.game.gameState.menuOptions[this.game.gameState.selectedIndex];
             this.game.gameState.lastActionTime = now;
             this.game.audioSystem.playSound('select');
+
+            // Selection runs through the shared ScanController (onSelect clicks
+            // the focused pause button); fall back to the inline dispatch below.
+            if (this.menuScan && this.menuScan.isMenuMode()) {
+                this.menuScan.select();
+                return;
+            }
             
             // Check which pause menu is currently visible
             const pauseMenu = document.getElementById('pauseMenu');
@@ -649,6 +689,12 @@ class InputHandler {
         if (menuModes.includes(this.game.gameState.mode)) {
             this.game.gameState.lastActionTime = now;
             this.game.audioSystem.playSound('select');
+            // Selection runs through the shared ScanController (onSelect ->
+            // MenuSystem.handleMenuSelection); fall back to the inline call.
+            if (this.menuScan && this.menuScan.isMenuMode()) {
+                this.menuScan.select();
+                return;
+            }
             this.game.menuSystem.handleMenuSelection();
             return;
         }

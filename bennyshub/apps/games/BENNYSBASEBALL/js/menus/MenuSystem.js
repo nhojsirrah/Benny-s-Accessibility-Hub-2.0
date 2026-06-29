@@ -803,6 +803,11 @@ class MenuSystem {
     }
 
     exitApp() {
+        // Prefer the shared Nav back contract: postMessage { action: 'closeApp' }
+        // to the hub iframe, electron window close, or history.back() standalone.
+        if (typeof window !== 'undefined' && window.Nav && window.Nav.goBack()) {
+            return;
+        }
         try {
             // Try to message parent window to focus the back button
             if (window.parent && window.parent !== window) {
