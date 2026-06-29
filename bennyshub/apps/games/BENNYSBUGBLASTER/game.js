@@ -3159,6 +3159,59 @@ function draw_game_end_screen(won) {
 let animationId;
 let pauseStartTime = 0;
 
+// Shared <benny-pause-overlay> instance for the PAUSED menu. Stays null while
+// window.BennyPauseOverlay is unavailable (the game then falls back to the
+// bespoke canvas-drawn pause panel). Built lazily the first time pause is shown.
+let pauseOverlay = null;
+
+// True while the shared overlay is driving the PAUSED menu. When this is true
+// the canvas pause panel is suppressed and the menu ScanController scans the
+// overlay's action buttons instead of the canvas {value,label} targets.
+function sharedPauseActive() {
+    return !!(pauseOverlay && pauseOverlay.isOpen() && gameState === 'PAUSED');
+}
+
+// Build the overlay's action list from the PAUSED options, verbatim. Each action
+// reuses the existing runMenuAction() PAUSED branch by seating
+// menu_selected_index and invoking it, so the handlers (Continue / Restart Level
+// / Settings / Main Menu) stay byte-for-byte the originals.
+function pauseOverlayActions() {
+    const labels = ["Continue", "Restart Level", "Settings", "Main Menu"];
+    return labels.map((label, i) => ({
+        id: String(i),
+        label,
+        onSelect: () => {
+            menu_selected_index = i;
+            runMenuAction();
+        },
+    }));
+}
+
+// Show the PAUSED menu through the shared overlay. Returns true when the shared
+// overlay handled it, false when BennyPauseOverlay is absent (caller then keeps
+// the bespoke canvas panel). The game's own ScanController still drives
+// stepping/selection (getMenuTargets routes at the overlay's buttons while it is
+// open); the overlay only supplies the targets and runs activate().
+function showPauseOverlay() {
+    if (!window.BennyPauseOverlay) return false; // fall back to the canvas panel
+
+    if (!pauseOverlay) {
+        pauseOverlay = window.BennyPauseOverlay.create({
+            actions: pauseOverlayActions(),
+            scanManager: window.NarbeScanManager,
+            voice: window.NarbeVoiceManager,
+        });
+    } else {
+        pauseOverlay.setActions(pauseOverlayActions());
+    }
+
+    pauseOverlay.show();
+    // Seat the menu scan before the first action so the first Space tap lands on
+    // "Continue" (index 0), matching the pre-overlay canvas behaviour.
+    if (menuScan) menuScan.setIndex(-1);
+    return true;
+}
+
 function draw_grass() {
     let pct = (max_tower_hp > 0) ? (tower_hp / max_tower_hp) : 1;
     let bColor = "#388e3c";
@@ -3402,7 +3455,8 @@ function loop() {
         draw_buy_menu();
     }
     else if (gameState === 'PAUSED') {
-        draw_pause_menu();
+        // Suppress the canvas panel while the shared DOM overlay is on screen.
+        if (!sharedPauseActive()) draw_pause_menu();
     }
     else if (gameState === 'SETTINGS') {
         draw_settings_menu();
@@ -3612,6 +3666,9 @@ function getMenuTargets() {
         case 'INSTRUCTIONS':
             return [{ value: 0, label: "Back" }];
         case 'PAUSED':
+            // Shared overlay open: scan its action buttons instead of the canvas
+            // {value,label} targets (the overlay supplies the targets verbatim).
+            if (sharedPauseActive()) return pauseOverlay.getTargets();
             return [
                 { value: 0, label: "Continue" },
                 { value: 1, label: "Restart Level" },
@@ -3644,6 +3701,9 @@ function getMenuTargets() {
 
 function syncScanIndex() {
     if (!menuScan) return;
+    // While the shared overlay owns PAUSED its buttons carry no .value, so the
+    // controller's own index is authoritative -- don't try to realign it here.
+    if (sharedPauseActive()) return;
     const targets = getMenuTargets();
     let pos = -1;
     for (let i = 0; i < targets.length; i++) {
@@ -3654,14 +3714,39 @@ function syncScanIndex() {
 
 const menuScan = new window.ScanController({
     getTargets: getMenuTargets,
-    onFocus: (t) => { menu_selected_index = t.value; },
+    onFocus: (t) => {
+        // Shared overlay open: targets are DOM buttons. Track the index for the
+        // PAUSED handlers and move native focus so the overlay highlight shows.
+        if (sharedPauseActive()) {
+            const idx = pauseOverlay.getTargets().indexOf(t);
+            if (idx >= 0) menu_selected_index = idx;
+            if (t && typeof t.focus === 'function') t.focus();
+            return;
+        }
+        menu_selected_index = t.value;
+    },
     onAnnounce: (t) => {
+        // Shared overlay open: speak the focused button's label.
+        if (sharedPauseActive()) {
+            if (t) speak(t.getAttribute('aria-label') || t.textContent || '');
+            return;
+        }
         // Preserve the per-menu announcement: BUY speaks the priced selection
         // helper; every other menu speaks the item label.
         if (gameState === 'BUY') speakSelection();
         else if (t && t.label != null) speak(t.label);
     },
-    onSelect: () => { runMenuAction(); },
+    onSelect: (t) => {
+        // Shared overlay open: let it run the focused action (wired to the same
+        // runMenuAction PAUSED branch), then close once we've left PAUSED.
+        if (sharedPauseActive()) {
+            const target = t || pauseOverlay.getTargets()[menuScan.getIndex()];
+            if (target) pauseOverlay.activate(target);
+            if (gameState !== 'PAUSED' && pauseOverlay.isOpen()) pauseOverlay.hide();
+            return;
+        }
+        runMenuAction();
+    },
     wrap: true,
     spaceHoldMs: 3000,
     reverseCadenceMs: 2000,
@@ -3874,6 +3959,7 @@ function checkInputHolds() {
                 pauseStartTime = Date.now()/1000;
                 menu_selected_index = -1;
                 speak("Paused");
+                showPauseOverlay();
             }
         }
     }
@@ -3924,6 +4010,7 @@ function handleInput(x, y) {
              pauseStartTime = Date.now()/1000;
              menu_selected_index = -1;
              speak("Paused");
+             showPauseOverlay();
              click_block_time = Date.now() + 300;
              return;
          }
@@ -4043,6 +4130,8 @@ function handleInput(x, y) {
              }
         }
     } else if (gameState === 'PAUSED') {
+         // Shared overlay handles its own button clicks; skip canvas hit-testing.
+         if (sharedPauseActive()) return;
          // Pause Menu Click Handling
          let panelW = Math.min(450, SCREEN_WIDTH * 0.9);
          let panelH = 450;
@@ -4117,6 +4206,8 @@ if (typeof module === 'undefined' || !module.exports) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
         getScan: () => menuScan,
+        getPauseOverlay: () => pauseOverlay,
+        showPauseOverlay,
         getMenuTargets,
         syncScanIndex,
         scanForward,
