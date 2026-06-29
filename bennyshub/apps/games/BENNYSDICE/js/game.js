@@ -220,44 +220,36 @@ function updateSettingsUI() {
     if (soundEl) soundEl.textContent = gameSettings.sound ? 'On' : 'Off';
 }
 
-// --- Auto Scan Integration ---
-let autoScanTimer = null;
+// --- Auto Scan Integration (driven by the shared ScanController) ---
+// The controller owns the auto-scan interval, its cadence, and the
+// pause-while-a-switch-is-held behavior. resolveScanInterval mirrors the old
+// scanSettings.scanInterval lookup and is reused for the hold-Space reverse
+// cadence.
+function resolveScanInterval() {
+    if (window.NarbeScanManager) return window.NarbeScanManager.getScanInterval();
+    return inputState.config.repeatInterval;
+}
 
+// (Re)start / stop auto-scan via the controller. Kept as named wrappers so any
+// existing/legacy call site continues to work.
 function startAutoScan() {
-    stopAutoScan();
-    if (!window.NarbeScanManager) return;
-    const scanSettings = window.NarbeScanManager.getSettings();
-    if (!scanSettings.autoScan) return;
-
-    autoScanTimer = setInterval(() => {
-        // Pause auto scanning while user holds input
-        if (inputState.spaceHeld) return;
-
-        moveScan(1);
-    }, scanSettings.scanInterval);
+    if (!window.diceScan) return;
+    window.diceScan.reverseCadenceMs = resolveScanInterval();
+    window.diceScan.start();
 }
 
 function stopAutoScan() {
-    if (autoScanTimer) {
-        clearInterval(autoScanTimer);
-        autoScanTimer = null;
-    }
+    if (window.diceScan) window.diceScan.stop();
 }
 
-// Subscribe to scan manager changes
+// Keep the settings display + reverse cadence in sync when scan settings change.
+// The controller subscribes to NarbeScanManager itself for cadence / autoScan
+// changes, so this only refreshes the UI and the hold-Space reverse cadence.
 if (window.NarbeScanManager) {
     window.NarbeScanManager.subscribe(() => {
-        if (window.NarbeScanManager.getSettings().autoScan) {
-            startAutoScan();
-        } else {
-            stopAutoScan();
-        }
+        if (window.diceScan) window.diceScan.reverseCadenceMs = resolveScanInterval();
         updateSettingsUI();
     });
-    // Initial check
-    if (window.NarbeScanManager.getSettings().autoScan) {
-        startAutoScan();
-    }
 }
 
 // --- Setup Scene ---
@@ -1351,8 +1343,12 @@ function handleMenuAction(action) {
         setAppState(appState.previousState || 'MENU');
     }
     if (action === 'exit') {
-        // Navigate back to bennyshub
-        if (window.parent && window.parent !== window) {
+        // Navigate back to bennyshub via the shared Nav contract (postMessage
+        // closeApp inside the hub iframe), keeping the legacy postMessage +
+        // location.href as fallbacks.
+        if (window.Nav && typeof window.Nav.goBack === 'function') {
+            window.Nav.goBack();
+        } else if (window.parent && window.parent !== window) {
             window.parent.postMessage({ action: 'focusBackButton' }, '*');
         } else {
             location.href = '../../../index.html';
@@ -1491,6 +1487,11 @@ function refreshScanFocus(shouldSpeak = true) {
 
     if (appState.scanIndex >= targets.length) appState.scanIndex = 0;
 
+    // Keep the shared ScanController's cursor aligned with the app's index so the
+    // next switch press advances from the currently-highlighted target (covers
+    // state entry, mouse hover and the per-turn scanIndex resets).
+    if (window.diceScan) window.diceScan.setIndex(appState.scanIndex);
+
     const target = targets[appState.scanIndex];
     target.classList.add('focused');
 
@@ -1556,57 +1557,63 @@ function activateFocused() {
     }
 }
 
-function moveScan(direction) {
+// --- Scan engine: shared ScanController -------------------------------------
+// The controller owns the scan index, cadence, hold-Space-to-reverse (>= 3s)
+// and OS auto-repeat handling, plus the NumpadEnter alias for select. The app
+// supplies the live target list (getFocusables, re-read every step) and reuses
+// its existing highlight / announce / select behavior.
+
+// Highlight the focused target (no announce). refreshScanFocus does the visual
+// work and keeps the controller's cursor aligned with appState.scanIndex.
+function onScanFocus(target, index) {
+    appState.scanIndex = index;
+    refreshScanFocus(false);
+}
+
+// Announce the focused target. Split from onScanFocus so the controller's
+// per-step announcement matches the old moveScan -> refreshScanFocus(true).
+function onScanAnnounce() {
     const targets = getFocusables();
-    if (targets.length === 0) return;
-    appState.scanIndex = (appState.scanIndex + direction + targets.length) % targets.length;
-    refreshScanFocus();
-}
-
-function onSpaceShortPress() {
-    moveScan(1);
-}
-
-function onSpaceLongPress() {
-    moveScan(-1); // Move backward immediately
-    // Get speed from manager if available
-    const speed = (window.NarbeScanManager) ? window.NarbeScanManager.getScanInterval() : inputState.config.repeatInterval;
-    inputState.timers.spaceRepeat = setInterval(() => {
-        moveScan(-1);
-    }, speed);
-}
-
-// Input Listener
-window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space') {
-        e.preventDefault();
-        if (!inputState.spaceHeld) {
-            inputState.spaceHeld = true;
-            inputState.spaceTime = Date.now();
-            inputState.timers.space = setTimeout(onSpaceLongPress, inputState.config.longPress);
-        }
+    if (appState.scanIndex >= 0 && appState.scanIndex < targets.length) {
+        announceElement(targets[appState.scanIndex]);
     }
-});
+}
 
+// Select the focused target; the controller's index is authoritative.
+function onScanSelect() {
+    if (window.diceScan) appState.scanIndex = window.diceScan.getIndex();
+    activateFocused();
+}
+
+function setupScan() {
+    if (!window.ScanController) {
+        console.error('[BennysDice] ScanController not loaded — scanning unavailable.');
+        return;
+    }
+    window.diceScan = new window.ScanController({
+        getTargets: getFocusables,                 // re-read every step (state-aware)
+        onFocus: onScanFocus,
+        onAnnounce: onScanAnnounce,
+        onSelect: onScanSelect,
+        wrap: true,
+        spaceHoldMs: inputState.config.longPress,  // hold Space >= 3s -> reverse scan
+        reverseCadenceMs: resolveScanInterval(),   // reverse cadence = scan speed
+        // Dice has no hold-Enter affordance (no pause, no back), so the Enter-hold
+        // threshold is set unreachable: a release of any length always selects,
+        // exactly as the old keyup-Enter handler did. minPressMs / minSelectMs /
+        // minIntervalMs are left at 0 — Dice had no anti-tremor/min-press gate.
+        enterHoldMs: 2147483647,
+        scanManager: window.NarbeScanManager,
+        voice: window.NarbeVoiceManager
+    });
+    window.diceScan.attach(document);
+    window.diceScan.start();
+}
+
+// App-specific key not owned by the controller: Escape leaves a game.
 window.addEventListener('keyup', (e) => {
-    if (e.code === 'Space') {
-        e.preventDefault(); 
-        clearTimeout(inputState.timers.space);
-        clearInterval(inputState.timers.spaceRepeat);
-
-        if (inputState.spaceHeld) {
-            const duration = Date.now() - inputState.spaceTime;
-            if (duration < inputState.config.longPress) {
-                onSpaceShortPress();
-            }
-        }
-        inputState.spaceHeld = false;
-    }
-    if (e.code === 'Enter') { 
-        activateFocused();
-    }
     if (e.code === 'Escape') {
-        if(appState.state === 'GAME') setAppState('MENU');
+        if (appState.state === 'GAME') setAppState('MENU');
     }
 });
 
@@ -1641,6 +1648,7 @@ document.body.addEventListener('mousemove', (e) => {
      }
 });
 
+setupScan();
 updateUI();
 setAppState('MENU');
 refreshScanFocus();
