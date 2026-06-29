@@ -681,6 +681,26 @@
       max-width: 720px;
       margin: 0 auto;
     }
+
+    /* Shared HUD chrome (<benny-hud>) — styled to match the hub's nav buttons
+       so it scans/looks consistent with the rest of the chrome. */
+    benny-hud.hub-hud{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+    }
+    .benny-hud-button{
+      appearance:none; border:1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.03); color:var(--text);
+      padding:10px 14px; border-radius:12px; font-weight:700; cursor:pointer;
+      transition: all .2s ease; outline: none;
+    }
+    .benny-hud-button:hover{
+      transform: translateY(-1px);
+      background: rgba(255,255,255,.05);
+    }
+    .benny-hud-button:focus{ box-shadow: var(--ring); }
+    body.size-large .benny-hud-button{ font-size: 18px; padding: 14px 20px; }
+    body.size-larger .benny-hud-button{ font-size: 22px; padding: 16px 24px; }
+    body.size-largest .benny-hud-button{ font-size: 26px; padding: 20px 30px; }
   </style>
 </head>
 <body>
@@ -718,9 +738,13 @@
                         this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2280%22 height=%2280%22 viewBox=%220 0 80 80%22%3E%3Crect width=%2280%22 height=%2280%22 fill=%22%23ff5c00%22 opacity=%220.2%22 rx=%228%22/%3E%3Ctext x=%2240%22 y=%2245%22 text-anchor=%22middle%22 font-family=%22sans-serif%22 font-size=%2214%22 fill=%22%23ff5c00%22%3EBenny%3C/text%3E%3C/svg%3E';
                       }" 
              onload="console.log('Benny logo loaded successfully from:', this.src);"
-             alt="Beamin Benny" 
+             alt="Beamin Benny"
              class="benny-logo" />
       </div>
+      <!-- Shared HUD chrome: a single scannable Back / Pause / Settings bar.
+           Wired in the inline script below (back -> hub close/return,
+           pause/settings -> IP-4 handshake or hub settings screen). -->
+      <benny-hud id="hub-hud" class="hub-hud" buttons="back pause settings"></benny-hud>
     </header>
 
     <main id="main" tabindex="-1">
@@ -982,6 +1006,10 @@
   <script src="shared/scan-manager.js"></script>
   <!-- Shared Manifest Validator (load-time app-contract gate) -->
   <script src="shared/manifest-validator.js"></script>
+  <!-- Shared HUD chrome: one scannable Back / Pause / Settings surface -->
+  <script src="shared/hud.js"></script>
+  <!-- Typed registry over the loaded games.json / tools.json manifests -->
+  <script src="shared/hub-registry.js"></script>
 
   <script>
     /**
@@ -1003,9 +1031,12 @@
     const iframeBack = document.getElementById('iframe-back');
     const iframeTitle = document.getElementById('iframe-title');
     const appIframe = document.getElementById('app-iframe');
+    const bennyHud = document.getElementById('hub-hud');
 
-    // App data and state
-    let appsData = { tools: [], games: [] };
+    // App data and state. The loaded manifests are modelled as a typed
+    // registry (shared/hub-registry.js) rather than bare arrays; the launcher
+    // iterates the registry for listing, filtering and title lookup.
+    const hubRegistry = window.HubRegistry.createHubRegistry();
     let currentScreen = 'home';
     let filterState = {
       tools: { genre: 'all', page: 0 },
@@ -1092,40 +1123,31 @@
         const validTools = validateManifestEntries(toolsData.tools, 'tools.json');
         const validGames = validateManifestEntries(gamesData.games, 'games.json');
 
-        appsData.tools = validTools.sort((a, b) => a.title.localeCompare(b.title));
-        appsData.games = validGames.sort((a, b) => a.title.localeCompare(b.title));
-        
-        console.log('Apps data loaded:', appsData);
-        console.log('Tools count:', appsData.tools.length);
-        console.log('Games count:', appsData.games.length);
+        // Populate the typed registry; it wraps each entry and title-sorts the
+        // category, preserving the previous load-time ordering exactly.
+        hubRegistry.setCategory('tools', validTools);
+        hubRegistry.setCategory('games', validGames);
+
+        console.log('Apps data loaded.');
+        console.log('Tools count:', hubRegistry.list('tools').length);
+        console.log('Games count:', hubRegistry.list('games').length);
       } catch (error) {
         console.error('Failed to load apps data:', error);
-        // Fallback to empty arrays
-        appsData = { tools: [], games: [] };
+        // Fallback to an empty registry
+        hubRegistry.setCategory('tools', []);
+        hubRegistry.setCategory('games', []);
       }
     }
 
-    // Get unique genres for a category
+    // Get unique genres for a category (delegated to the typed registry).
     function getGenres(category) {
-      const items = appsData[category] || [];
-      const genreSet = new Set();
-      items.forEach(item => {
-        if (item.genres) {
-          item.genres.forEach(genre => genreSet.add(genre));
-        }
-      });
-      return Array.from(genreSet).sort();
+      return hubRegistry.genres(category);
     }
 
-    // Filter items by genre
+    // Filter items by genre (delegated to the typed registry). Returns the
+    // category's HubAppEntry wrappers, already title-sorted.
     function filterItemsByGenre(category, genre) {
-      const items = appsData[category] || [];
-      
-      if (genre === 'all' || !genre) {
-        return items.sort((a, b) => a.title.localeCompare(b.title));
-      }
-      return items.filter(item => item.genres && item.genres.includes(genre))
-                  .sort((a, b) => a.title.localeCompare(b.title));
+      return hubRegistry.filterByGenre(category, genre);
     }
 
     // Paginate items
@@ -1734,6 +1756,53 @@
       closeIframe();
     });
 
+    // ---- Shared HUD (<benny-hud>) wiring --------------------------------------
+    // The HUD renders one scannable Back / Pause / Settings surface in the hub
+    // chrome. Its three controls drive the hub here (additive over the existing
+    // per-app launch/close and the IP-4 lifecycle handshake).
+
+    // Back: the hub's own contextual close/return. Injected as the HUD's `nav`
+    // so it runs instead of Nav.goBack(), whose top-level history.back() /
+    // window.close() would exit the whole hub.
+    function hudBack() {
+      if (iframeContainer.classList.contains('active')) {
+        speak('Closing app');
+        closeIframe();
+      } else if (currentScreen && currentScreen !== 'home') {
+        speak('Going back');
+        showScreen('home');
+      }
+    }
+
+    if (bennyHud) {
+      bennyHud.nav = { goBack: hudBack };
+
+      // Pause: forward the IP-4 `app:requestPause` handshake to the active app.
+      bennyHud.addEventListener('benny-hud:pause', () => {
+        if (iframeContainer.classList.contains('active') && appIframe.contentWindow) {
+          try {
+            appIframe.contentWindow.postMessage({ type: 'app:requestPause' }, '*');
+          } catch (e) {
+            console.log('Unable to forward pause to app:', e);
+          }
+        }
+      });
+
+      // Settings: open the hub settings screen, or forward app:requestSettings
+      // to the active app when one is running.
+      bennyHud.addEventListener('benny-hud:settings', () => {
+        if (iframeContainer.classList.contains('active') && appIframe.contentWindow) {
+          try {
+            appIframe.contentWindow.postMessage({ type: 'app:requestSettings' }, '*');
+          } catch (e) {
+            console.log('Unable to forward settings to app:', e);
+          }
+        } else {
+          showScreen('settings');
+        }
+      });
+    }
+
     // Screen management
     function showScreen(name) {
       isTransitioning = true;
@@ -1792,9 +1861,16 @@
         return [iframeBack];
       }
       const active = document.querySelector('.screen.active');
-      if(!active) return [];
-      return Array.from(active.querySelectorAll('button:not([disabled])'))
-        .filter(el => !el.hasAttribute('disabled'));
+      const screenButtons = active
+        ? Array.from(active.querySelectorAll('button:not([disabled])'))
+            .filter(el => !el.hasAttribute('disabled'))
+        : [];
+      // Append the shared HUD's controls so Back / Pause / Settings are scanned
+      // consistently alongside the active screen's own buttons.
+      const hudTargets = (bennyHud && typeof bennyHud.getTargets === 'function')
+        ? bennyHud.getTargets()
+        : [];
+      return screenButtons.concat(hudTargets);
     }
 
     function speakFocusedElement(el) {
@@ -2265,17 +2341,11 @@
 
       // Check URL parameters for auto-launch
       const urlParams = new URLSearchParams(window.location.search);
-      const openApp = urlParams.get('open'); 
+      const openApp = urlParams.get('open');
       if (openApp) {
-         let targetApp;
-         const lowerOpen = openApp.toLowerCase();
-         // Search in tools
-         targetApp = appsData.tools.find(t => t.title && t.title.toLowerCase() === lowerOpen);
-         if(!targetApp) targetApp = appsData.tools.find(t => t.title && t.title.toLowerCase().includes(lowerOpen));
-         // Search in games if not found
-         if(!targetApp) targetApp = appsData.games.find(g => g.title && g.title.toLowerCase() === lowerOpen);
-         if(!targetApp) targetApp = appsData.games.find(g => g.title && g.title.toLowerCase().includes(lowerOpen));
-
+         // Resolve across categories in the historical order (tools before
+         // games, exact match before substring) via the typed registry.
+         const targetApp = hubRegistry.findByTitle(openApp);
          if (targetApp) {
              console.log("Auto-launching app:", targetApp.title);
              // Ensure DOM is ready? We are in 'load' so yes.
@@ -2343,14 +2413,8 @@
         // Navigate to specific app
         showIframe(signal.path, signal.title || 'App');
       } else if (signal.target) {
-        // Navigate by app name
-        let targetApp;
-        const lowerTarget = signal.target.toLowerCase();
-        targetApp = appsData.tools.find(t => t.title && t.title.toLowerCase() === lowerTarget);
-        if (!targetApp) targetApp = appsData.tools.find(t => t.title && t.title.toLowerCase().includes(lowerTarget));
-        if (!targetApp) targetApp = appsData.games.find(g => g.title && g.title.toLowerCase() === lowerTarget);
-        if (!targetApp) targetApp = appsData.games.find(g => g.title && g.title.toLowerCase().includes(lowerTarget));
-        
+        // Navigate by app name — same registry resolution as auto-launch.
+        const targetApp = hubRegistry.findByTitle(signal.target);
         if (targetApp) {
           showIframe(targetApp.path, targetApp.title);
         }
