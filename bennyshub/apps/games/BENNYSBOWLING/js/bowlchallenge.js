@@ -549,6 +549,10 @@ var autoScanLastTime = 0.0; // Added for Auto Scan support
 // Enter hold to pause
 var enterHeld = false;
 var enterHoldStart = 0.0;
+// Shared single-switch scanning engine for the MENU/SETTINGS only (see
+// createMenuScanController). Null until buildMenus() wires it (and stays null
+// under the headless CommonJS test harness, which constructs its own).
+var menuScan = null;
 
 class Player {
 	constructor(id, local, physics, scores, ballMesh, pinMeshes) {
@@ -955,22 +959,17 @@ function updateScene(dt) {
 			if ((now - autoScanLastTime) >= scanInt) {
 				// Settings
 				if (settingsDiv && settingsDiv.style.display === 'flex' && !settingsScanHeld) {
-					settingsFocusIndex = (settingsFocusIndex + 1) % settingsItems.length;
-					applySettingsFocus();
+					menuScanAdvance();
 					autoScanLastTime = now;
 				}
 				// Menu
 				else if (gameState === 'menu' && (!settingsDiv || settingsDiv.style.display !== 'flex') && !menuScanHeld) {
-					if (menuFocusIndex === -1) menuFocusIndex = 0;
-					else menuFocusIndex = (menuFocusIndex + 1) % mainMenuItems.length;
-					applyMenuFocus();
+					menuScanAdvance();
 					autoScanLastTime = now;
 				}
 				// Pause
 				else if (gameState === 'paused' && (!settingsDiv || settingsDiv.style.display !== 'flex') && !pauseScanHeld) {
-					if (pauseFocusIndex === -1) pauseFocusIndex = 0;
-					else pauseFocusIndex = (pauseFocusIndex + 1) % pauseMenuItems.length;
-					applyPauseFocus();
+					menuScanAdvance();
 					autoScanLastTime = now;
 				}
 			}
@@ -982,9 +981,8 @@ function updateScene(dt) {
 			if (held >= 3.0) {
 				var stepInterval = (typeof NarbeScanManager !== 'undefined') ? (NarbeScanManager.getScanInterval() / 1000.0) : 2.0;
 				if ((now - menuLastBackStep) >= stepInterval) {
-					menuFocusIndex = (menuFocusIndex - 1 + mainMenuItems.length) % mainMenuItems.length;
 					menuLastBackStep = now;
-					applyMenuFocus();
+					menuScanBack();
 				}
 			}
 		}
@@ -994,9 +992,8 @@ function updateScene(dt) {
 			if (heldP >= 3.0) {
 				var stepIntervalP = (typeof NarbeScanManager !== 'undefined') ? (NarbeScanManager.getScanInterval() / 1000.0) : 2.0;
 				if ((now - pauseLastBackStep) >= stepIntervalP) {
-					pauseFocusIndex = (pauseFocusIndex - 1 + pauseMenuItems.length) % pauseMenuItems.length;
 					pauseLastBackStep = now;
-					applyPauseFocus();
+					menuScanBack();
 				}
 			}
 		}
@@ -1006,9 +1003,8 @@ function updateScene(dt) {
 			if (heldS >= 3.0) {
 				var stepIntervalS = (typeof NarbeScanManager !== 'undefined') ? (NarbeScanManager.getScanInterval() / 1000.0) : 2.0;
 				if ((now - settingsLastBackStep) >= stepIntervalS) {
-					settingsFocusIndex = (settingsFocusIndex - 1 + settingsItems.length) % settingsItems.length;
 					settingsLastBackStep = now;
-					applySettingsFocus();
+					menuScanBack();
 				}
 			}
 		}
@@ -1553,15 +1549,14 @@ function onDocumentKeyUp(event) {
 				var t = (typeof clock.getElapsedTime === 'function') ? clock.getElapsedTime() : 0.0;
 				var held = Math.max(0.0, t - settingsHoldStart);
 				if (held < 3.0) {
-					settingsFocusIndex = (settingsFocusIndex + 1) % settingsItems.length;
-					applySettingsFocus();
+					menuScanAdvance();
 				}
 				settingsScanHeld = false;
 				return;
 			}
-			if (event.code === 'Enter') {
+			if (isSelectKey(event)) {
 				event.preventDefault();
-				handleSettingsEnter();
+				menuScanSelect();
 				return;
 			}
 			return;
@@ -1572,25 +1567,23 @@ function onDocumentKeyUp(event) {
 				if (gameState === 'menu') {
 					var held2 = Math.max(0.0, t2 - menuHoldStart);
 					if (held2 < 3.0) {
-						menuFocusIndex = (menuFocusIndex + 1) % mainMenuItems.length;
-						applyMenuFocus();
+						menuScanAdvance();
 					}
 					menuScanHeld = false;
 				} else {
 					var heldP = Math.max(0.0, t2 - pauseHoldStart);
 					if (heldP < 3.0) {
-						pauseFocusIndex = (pauseFocusIndex + 1) % pauseMenuItems.length;
-						applyPauseFocus();
+						menuScanAdvance();
 					}
 					pauseScanHeld = false;
 				}
 				return;
 			}
-			if (event.code === 'Enter') {
+			if (isSelectKey(event)) {
 				event.preventDefault();
 				// Prevent key-repeat from immediately activating default choice when a menu just opened
 				if (event.repeat) return;
-				if (gameState === 'menu') handleMainMenuEnter(); else handlePauseMenuEnter();
+				menuScanSelect();
 				return;
 			}
 			return;
@@ -1716,6 +1709,20 @@ function loadSettings() {
 		}
 	} catch (e) {}
 	
+	// Adopt the shared SettingsStore: overlay any bowling app-scoped values on top
+	// of the legacy blob so settings set through the shared store are honored. The
+	// legacy 'benny_settings' blob stays authoritative on write; themes stay local.
+	try {
+		if (typeof window !== 'undefined' && window.SettingsStore) {
+			var bowlStore = window.SettingsStore.app('bowling');
+			var bowlKeys = ['themeIndex', 'tts', 'music', 'sfx', 'voiceIndex', 'ballStyleIndex', 'aimerColorIndex'];
+			for (var bki = 0; bki < bowlKeys.length; bki++) {
+				var bkv = bowlStore.get(bowlKeys[bki]);
+				if (bkv !== undefined) settings[bowlKeys[bki]] = bkv;
+			}
+		}
+	} catch (e) {}
+
 	// Sync with NarbeVoiceManager if available - ALWAYS use voice manager as source of truth
 	try {
 		if (window.NarbeVoiceManager) {
@@ -1750,6 +1757,20 @@ function loadSettings() {
 function saveSettings() {
 	try {
 		localStorage.setItem('benny_settings', JSON.stringify(settings));
+		// Adopt the shared SettingsStore: mirror the bowling app-scoped keys so other
+		// surfaces stay in sync. localStorage 'benny_settings' remains authoritative.
+		try {
+			if (typeof window !== 'undefined' && window.SettingsStore) {
+				var bowlStore = window.SettingsStore.app('bowling');
+				bowlStore.set('themeIndex', settings.themeIndex | 0);
+				bowlStore.set('tts', !!settings.tts);
+				bowlStore.set('music', !!settings.music);
+				bowlStore.set('sfx', !!settings.sfx);
+				bowlStore.set('voiceIndex', settings.voiceIndex | 0);
+				bowlStore.set('ballStyleIndex', settings.ballStyleIndex | 0);
+				bowlStore.set('aimerColorIndex', settings.aimerColorIndex | 0);
+			}
+		} catch (e) {}
 		
 		// Sync TTS setting to voice manager without overriding its current voice
 		if (window.NarbeVoiceManager) {
@@ -2005,6 +2026,10 @@ function buildMenus() {
 		{ el: closeBtn, action: ()=> closeBtn.onclick() }
 	];
 	settingsFocusIndex = 0;
+
+	// Wire the shared menu scanning engine now that the menus exist. Stays null
+	// if the shared ScanController failed to load (graceful degradation).
+	menuScan = createMenuScanController(currentMenuContext);
 }
 
 function applyMenuFocus() {
@@ -2061,10 +2086,139 @@ function applySettingsFocus() {
 	} catch(e) {}
 }
 
+// ---------- Shared menu scanning (ScanController engine) ----------
+// MENU/SETTINGS scanning ONLY is routed through the shared single-switch
+// ScanController (shared/scan-core.js), used here as a single-axis movement +
+// announce + select ENGINE. The controller is intentionally NOT attached to the
+// document: the same Space/Enter keys also drive the 3D aiming / throw gameplay,
+// which keeps its own untouched key path (see the gameplay branches of
+// onDocumentKeyDown / onDocumentKeyUp and updateScene). The existing menu key
+// handling and the clock-driven hold / auto-scan / reverse timing are preserved
+// verbatim; only the cursor move, highlight and select now flow through the
+// controller.
+//
+// Anti-tremor: this game never had a min-press / sensitivity / Date.now() input
+// gate (only OS key-repeat guards via event.repeat, which the controller also
+// honors), so the debounce floors are left at 0 (off). spaceHoldMs is kept at
+// 3000 to match the original 3.0s hold-to-reverse threshold.
+//
+// Themes are intentionally kept LOCAL (buildThemes / 3D function-based themes);
+// they are out of scope for the shared themes module.
+
+// Resolve the menu the cursor is currently scanning (single-axis). Each context
+// exposes the live element list, get/set index, the existing highlight+speak
+// (applyFocus) and the existing select action so the controller drives them.
+function currentMenuContext() {
+	if (settingsDiv && settingsDiv.style.display === 'flex') {
+		return {
+			items: settingsItems.map(function (it) { return it.el; }),
+			getIndex: function () { return settingsFocusIndex; },
+			setIndex: function (i) { settingsFocusIndex = i; },
+			applyFocus: applySettingsFocus,
+			selectAt: function () { handleSettingsEnter(); },
+		};
+	}
+	if (gameState === 'menu') {
+		return {
+			items: mainMenuItems,
+			getIndex: function () { return menuFocusIndex; },
+			setIndex: function (i) { menuFocusIndex = i; },
+			applyFocus: applyMenuFocus,
+			selectAt: function () { handleMainMenuEnter(); },
+		};
+	}
+	return {
+		items: pauseMenuItems,
+		getIndex: function () { return pauseFocusIndex; },
+		setIndex: function (i) { pauseFocusIndex = i; },
+		applyFocus: applyPauseFocus,
+		selectAt: function () { handlePauseMenuEnter(); },
+	};
+}
+
+// Build the single-axis ScanController used as the menu engine. getActiveMenu()
+// returns the current context on every call so one controller serves the main,
+// pause and settings menus. onFocus reuses each menu index + highlight + speak
+// (applyFocus); onAnnounce is suppressed because applyFocus already speaks the
+// focused label; onSelect runs the focused item's existing action.
+function createMenuScanController(getActiveMenu) {
+	var Ctrl = (typeof window !== 'undefined') ? window.ScanController : undefined;
+	if (!Ctrl) return null;
+	return new Ctrl({
+		getTargets: function () {
+			var m = getActiveMenu();
+			return (m && m.items) ? m.items : [];
+		},
+		onFocus: function (el, index) {
+			var m = getActiveMenu();
+			if (!m) return;
+			m.setIndex(index);
+			m.applyFocus();
+		},
+		onAnnounce: function () {}, // applyFocus already announces; avoid double-speak
+		onSelect: function (el, index) {
+			var m = getActiveMenu();
+			if (!m) return;
+			m.setIndex(index);
+			m.selectAt(index);
+		},
+		wrap: true,
+		spaceHoldMs: 3000, // matches the original 3.0s hold-to-reverse threshold
+		minPressMs: 0,     // no anti-tremor gate existed in this game
+		minSelectMs: 0,
+		minIntervalMs: 0,
+		autoScan: false,   // auto-scan stays on the app's own clock-driven timer
+	});
+}
+
+// Sync the controller cursor to the active menu index, then move/select. The app
+// keeps ownership of WHEN to advance/reverse/select (its existing key + clock
+// timers); the controller owns the move + highlight + select. When the shared
+// module is unavailable the helpers fall back to the original inline behavior.
+function menuScanAdvance() {
+	var m = currentMenuContext();
+	if (!m) return;
+	if (menuScan) { menuScan.setIndex(m.getIndex()); menuScan.advance(); return; }
+	var n = m.items.length; if (!n) return;
+	var i = m.getIndex();
+	m.setIndex(i < 0 ? 0 : (i + 1) % n);
+	m.applyFocus();
+}
+
+function menuScanBack() {
+	var m = currentMenuContext();
+	if (!m) return;
+	if (menuScan) { menuScan.setIndex(m.getIndex()); menuScan.back(); return; }
+	var n = m.items.length; if (!n) return;
+	var i = m.getIndex();
+	m.setIndex(i < 0 ? n - 1 : (i - 1 + n) % n);
+	m.applyFocus();
+}
+
+function menuScanSelect() {
+	var m = currentMenuContext();
+	if (!m) return;
+	if (menuScan) { menuScan.setIndex(m.getIndex()); menuScan.select(); return; }
+	m.selectAt(m.getIndex());
+}
+
+// Shared select-key predicate (Enter + NumpadEnter). NumpadEnter parity comes
+// from the controller; falls back to a direct check without the shared module.
+function isSelectKey(event) {
+	if (menuScan && typeof menuScan.isSelect === 'function') return menuScan.isSelect(event);
+	return event.code === 'Enter' || event.code === 'NumpadEnter';
+}
+
 function exitGame() {
 	try {
         // Updated Exit Logic:
-		// Try to message parent window to focus the back button
+		// Adopt the shared Nav back-contract first: inside the hub iframe this posts
+		// { action: 'closeApp' } (which the hub handles like 'focusBackButton'); when
+		// standalone it falls back to the Electron window close / history.back().
+		if (typeof window !== 'undefined' && window.Nav && typeof window.Nav.goBack === 'function') {
+			if (window.Nav.goBack()) return;
+		}
+		// Fallback: message parent window to focus the back button
 		if (window.parent && window.parent !== window) {
 			window.parent.postMessage({ action: 'focusBackButton' }, '*');
 		} else {
@@ -2447,4 +2601,19 @@ function speakLatestRollOutcome(scores) {
 	}
 }
 
-init();
+// Browser auto-start. Under the CommonJS test harness, skip the 3D boot and
+// expose a small surface so the menu scanning can be exercised headless.
+if (typeof module !== 'undefined' && module.exports) {
+	module.exports = {
+		createMenuScanController: createMenuScanController,
+		currentMenuContext: currentMenuContext,
+		menuScanAdvance: menuScanAdvance,
+		menuScanBack: menuScanBack,
+		menuScanSelect: menuScanSelect,
+		isSelectKey: isSelectKey,
+		exitGame: exitGame,
+		getMenuScan: function () { return menuScan; },
+	};
+} else {
+	init();
+}
