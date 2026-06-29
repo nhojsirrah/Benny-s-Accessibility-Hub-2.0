@@ -168,16 +168,36 @@ function processGenres(items = null) {
     }
 }
 
+// Streaming's per-app `theme` now rides the shared SettingsStore (appId
+// "streaming"); the legacy "streaming_settings" blob is converted on first
+// read by SettingsStore's "streaming_settings" migration. highlightStyle
+// ('fill') and highlightColor are kept in the legacy blob: their values are
+// app-local and non-canonical (streaming spells the style 'fill', and its
+// color set includes 'green', which is not in the shared HIGHLIGHT_COLORS), so
+// routing them through the shared global store would change behaviour.
+const STREAMING_APP_ID = 'streaming';
+function streamingStore() {
+    return typeof window !== 'undefined' && window.SettingsStore && window.SettingsStore.app(STREAMING_APP_ID);
+}
+function readLegacyStreamingSettings() {
+    try {
+        return JSON.parse(localStorage.getItem('streaming_settings')) || {};
+    } catch (e) {
+        return {};
+    }
+}
+
 function loadSettings() {
     try {
-        const s = localStorage.getItem('streaming_settings');
-        if (s) {
-            const loaded = JSON.parse(s);
-            // Only load theme/highlight settings - scan/voice come from shared managers
-            settings.theme = loaded.theme || 'default';
-            settings.highlightStyle = loaded.highlightStyle || 'fill';
-            settings.highlightColor = loaded.highlightColor || 'yellow';
+        if (typeof window !== 'undefined' && window.SettingsStore) {
+            window.SettingsStore.runMigrations();
         }
+        const store = streamingStore();
+        const legacy = readLegacyStreamingSettings();
+        // theme via shared store (migrated); highlight* kept local (see note above).
+        settings.theme = (store && store.get('theme')) || legacy.theme || 'default';
+        settings.highlightStyle = legacy.highlightStyle || 'fill';
+        settings.highlightColor = legacy.highlightColor || 'yellow';
         applySettings();
     } catch(e) {
         console.error('[Streaming] Error loading settings:', e);
@@ -185,7 +205,17 @@ function loadSettings() {
 }
 
 function saveSettings() {
-    localStorage.setItem('streaming_settings', JSON.stringify(settings));
+    const store = streamingStore();
+    if (store) {
+        store.set('theme', settings.theme);
+    }
+    // highlight* stay in the legacy blob (kept local; a theme mirror is kept
+    // too for one-release rollback).
+    const legacy = readLegacyStreamingSettings();
+    legacy.theme = settings.theme;
+    legacy.highlightStyle = settings.highlightStyle;
+    legacy.highlightColor = settings.highlightColor;
+    localStorage.setItem('streaming_settings', JSON.stringify(legacy));
     applySettings();
 }
 
@@ -1877,18 +1907,12 @@ function cycleHighlightColor() {
 function exitApp() {
     console.log('[EXIT] exitApp called');
     
-    // Check if we're in an iframe (loaded from main hub)
-    if (window.parent && window.parent !== window) {
-        console.log('[EXIT] In iframe - sending close message to parent');
-        // Send message to parent to close the iframe
-        window.parent.postMessage({ action: 'closeApp' }, '*');
-        return;
-    }
-    
-    // If in Electron standalone (shouldn't happen, but handle it)
-    if (isElectron && window.electronAPI.window) {
-        console.log('[EXIT] Electron standalone - closing window');
-        window.electronAPI.window.close();
+    // Hub iframe (postMessage {action:'closeApp'}) and Electron standalone
+    // (electronAPI.window.close) are both handled by the shared Nav contract.
+    const framed = window.parent && window.parent !== window;
+    const electronStandalone = isElectron && window.electronAPI && window.electronAPI.window;
+    if ((framed || electronStandalone) && window.Nav && window.Nav.goBack()) {
+        console.log('[EXIT] Handled by shared Nav.goBack()');
         return;
     }
     

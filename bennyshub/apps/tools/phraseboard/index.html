@@ -523,6 +523,7 @@
   <!-- Include shared voice manager -->
   <script src="../../../shared/voice-manager.js"></script>
   <script src="../../../shared/scan-manager.js"></script>
+  <script src="../../../shared/nav.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
   
   <script>
@@ -2634,11 +2635,15 @@ function updateHeaderForCurrentView(){
       return `rgba(${r}, ${g}, ${b}, ${alpha})`;
     }
 
-    // Exit to hub function (matches keyboard and BENNYSPEGGLE pattern)
+    // Exit to hub via the shared Nav contract. Nav.goBack() posts
+    // { action: 'closeApp' } to the parent; the hub treats that and the older
+    // 'focusBackButton' alias identically (both tear down the active iframe), so
+    // this is behaviour-preserving for the hub.
     function exitToHub() {
       console.log("Exit button pressed - returning to hub");
       try {
-        // Message parent to focus back button and close iframe
+        if (window.Nav && window.Nav.goBack()) return;
+        // Fallback for older hub builds: the original focusBackButton message.
         if (window.parent && window.parent !== window) {
           window.parent.postMessage({ action: 'focusBackButton' }, '*');
         }
