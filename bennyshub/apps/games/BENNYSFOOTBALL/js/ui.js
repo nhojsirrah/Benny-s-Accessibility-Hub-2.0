@@ -937,8 +937,177 @@ class ScanInput {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// PauseOverlayController — thin adapter around the shared <benny-pause-overlay>
+// (window.BennyPauseOverlay, shared/pause-overlay.js) for the MAIN pause menu.
+//
+// Why an adapter and not the overlay's own key handling: Benny's Football is a
+// switch-scan game. Its single, shared ScanInput owns Space (tap = scan forward /
+// hold = scan back) and Enter / NumpadEnter (select) at the window level, exactly
+// like the in-canvas ScanList. The shared overlay, by contrast, treats Space AND
+// Enter on a *focused* button as "activate", which would hijack the scan gesture.
+// So we drive the overlay the way its contract intends for a scanning game —
+// getTargets() supplies the scan targets and activate() runs one — and we keep DOM
+// focus OUT of the overlay buttons so ScanInput stays authoritative. The current
+// option is shown with a highlight class (mirroring the overlay's focus ring) and
+// announced through the same audio.speak path the ScanList uses, so the spoken /
+// visual feedback is unchanged from the bespoke menu.
+//
+// create() returns false when window.BennyPauseOverlay is absent so the caller can
+// fall back to the bespoke in-canvas pause menu.
+// ═══════════════════════════════════════════════════════════════════════════════
+const PAUSE_HILITE_CLASS = 'football-pause-current';
+const PAUSE_HILITE_STYLE_ID = 'football-pause-current-style';
+
+class PauseOverlayController {
+    /**
+     * @param {object} cfg { actions:[{id,label,onSelect}], scanManager, voice, audio }
+     */
+    constructor(cfg) {
+        cfg = cfg || {};
+        this.actions = cfg.actions || [];
+        this.scanManager = cfg.scanManager || null;
+        this.voice = cfg.voice || null;
+        this.audio = cfg.audio || null;
+        this.overlay = null;
+        // -1 = nothing highlighted yet, matching ScanList (first Space highlights).
+        this.index = -1;
+    }
+
+    /**
+     * Build the shared overlay. Returns true on success, false when the shared
+     * module is unavailable (caller then uses the bespoke fallback).
+     */
+    create() {
+        const api = (typeof window !== 'undefined') ? window.BennyPauseOverlay : null;
+        if (!api || typeof api.create !== 'function') return false;
+        this._injectHighlightStyle();
+        this.overlay = api.create({
+            actions: this.actions,
+            scanManager: this.scanManager,
+            voice: this.voice,
+        });
+        return !!this.overlay;
+    }
+
+    setActions(actions) {
+        this.actions = actions || [];
+        if (this.overlay && typeof this.overlay.setActions === 'function') {
+            this.overlay.setActions(this.actions);
+        }
+    }
+
+    show() {
+        if (!this.overlay) return;
+        this.index = -1;
+        this.overlay.show();
+        // The overlay focuses its first button on show(); move focus back out so a
+        // Space/Enter press can't hit the overlay's own activate handler instead of
+        // flowing through ScanInput. Nothing is highlighted until the first scan.
+        this._blurInsideOverlay();
+        this._clearHighlight();
+    }
+
+    hide() {
+        this._clearHighlight();
+        if (this.overlay && this.overlay.isOpen && this.overlay.isOpen()) {
+            this.overlay.hide();
+        }
+    }
+
+    isOpen() {
+        return !!(this.overlay && this.overlay.isOpen && this.overlay.isOpen());
+    }
+
+    _targets() {
+        return (this.overlay && typeof this.overlay.getTargets === 'function')
+            ? (this.overlay.getTargets() || [])
+            : [];
+    }
+
+    next() {
+        const n = this._targets().length;
+        if (!n) return;
+        this.index = this.index < 0 ? 0 : (this.index + 1) % n;
+        this._applyHighlight(true);
+    }
+
+    prev() {
+        const n = this._targets().length;
+        if (!n) return;
+        this.index = this.index < 0 ? n - 1 : (this.index - 1 + n) % n;
+        this._applyHighlight(true);
+    }
+
+    select() {
+        if (this.index < 0) return; // nothing highlighted — Enter does nothing
+        const btn = this._targets()[this.index];
+        if (!btn) return;
+        if (this.audio) this.audio.play('select');
+        if (typeof this.overlay.activate === 'function') this.overlay.activate(btn);
+    }
+
+    // Hide and remove the overlay element from the DOM. Called on full pause exit so
+    // a fresh GameScene (restart / new game) does not leave orphaned overlays behind.
+    destroy() {
+        this.hide();
+        if (this.overlay && typeof this.overlay.remove === 'function') {
+            try { this.overlay.remove(); } catch (e) { /* ignore */ }
+        }
+        this.overlay = null;
+    }
+
+    // ── helpers ────────────────────────────────────
+    _applyHighlight(announce) {
+        const targets = this._targets();
+        this._clearHighlight(targets);
+        const btn = targets[this.index];
+        if (!btn) return;
+        if (btn.classList) btn.classList.add(PAUSE_HILITE_CLASS);
+        if (btn.setAttribute) btn.setAttribute('aria-current', 'true');
+        if (announce) {
+            if (this.audio) this.audio.play('scan');
+            const label = btn.getAttribute
+                ? (btn.getAttribute('aria-label') || btn.textContent || '')
+                : (btn.textContent || '');
+            if (this.audio && label) this.audio.speak(label, true);
+        }
+    }
+
+    _clearHighlight(targets) {
+        (targets || this._targets()).forEach((b) => {
+            if (b.classList) b.classList.remove(PAUSE_HILITE_CLASS);
+            if (b.removeAttribute) b.removeAttribute('aria-current');
+        });
+    }
+
+    _blurInsideOverlay() {
+        const doc = (typeof document !== 'undefined') ? document : null;
+        if (!doc) return;
+        const active = doc.activeElement;
+        if (active && this._targets().indexOf(active) >= 0 && typeof active.blur === 'function') {
+            try { active.blur(); } catch (e) { /* ignore */ }
+        }
+    }
+
+    _injectHighlightStyle() {
+        const doc = (typeof document !== 'undefined') ? document : null;
+        if (!doc || typeof doc.createElement !== 'function' || !doc.head) return;
+        if (doc.getElementById(PAUSE_HILITE_STYLE_ID)) return;
+        const style = doc.createElement('style');
+        style.id = PAUSE_HILITE_STYLE_ID;
+        // Mirror the overlay's own :focus ring so the scanned option looks the same
+        // as a keyboard-focused one, even though we never put DOM focus on it.
+        style.textContent =
+            '.benny-pause-action.' + PAUSE_HILITE_CLASS +
+            '{outline:none;border-color:#ffeb3b;box-shadow:0 0 0 4px rgba(255,235,59,0.6);}';
+        doc.head.appendChild(style);
+    }
+}
+
 // CommonJS surface so the jsdom test harness can require() these classes. No-op
 // in the browser (module is undefined there); does not change runtime behavior.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { ScanList, PlayDiagram, ScanInput };
+    module.exports = { ScanList, PlayDiagram, ScanInput, PauseOverlayController };
 }
+

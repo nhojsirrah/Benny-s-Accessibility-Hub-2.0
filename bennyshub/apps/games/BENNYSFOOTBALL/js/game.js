@@ -339,21 +339,33 @@ class GameScene extends Phaser.Scene {
 
     // SPACE tap → move the active scan list / receiver pick forward.
     scanForward() {
-        if (this.paused) { if (this.pauseMenu) this.pauseMenu.next(false); return; }
+        if (this.paused) {
+            if (this._sharedPauseActive()) { this.pauseOverlayCtrl.next(); return; }
+            if (this.pauseMenu) this.pauseMenu.next(false);
+            return;
+        }
         if ((this.phase === 'playcall' || this.phase === 'defcall') && this.playMenu) this.playMenu.next(false);
         else if (this.phase === 'receiver') this.receiverNext();
     }
 
     // HOLD SPACE → move backward (repeats at the scan-manager interval).
     scanBackward() {
-        if (this.paused) { if (this.pauseMenu) this.pauseMenu.prev(false); return; }
+        if (this.paused) {
+            if (this._sharedPauseActive()) { this.pauseOverlayCtrl.prev(); return; }
+            if (this.pauseMenu) this.pauseMenu.prev(false);
+            return;
+        }
         if ((this.phase === 'playcall' || this.phase === 'defcall') && this.playMenu) this.playMenu.prev(false);
         else if (this.phase === 'receiver') this.receiverPrev();
     }
 
     // ENTER tap → confirm whatever is focused for the current phase.
     commit() {
-        if (this.paused) { if (this.pauseMenu) this.pauseMenu.select(); return; }
+        if (this.paused) {
+            if (this._sharedPauseActive()) { this.pauseOverlayCtrl.select(); return; }
+            if (this.pauseMenu) this.pauseMenu.select();
+            return;
+        }
         switch (this.phase) {
             case 'playcall': if (this.playMenu) this.playMenu.select(); break;
             case 'defcall': if (this.playMenu) this.playMenu.select(); break;
@@ -3329,10 +3341,66 @@ class GameScene extends Phaser.Scene {
         this.paused = true;
         this.pauseView = 'main';
         this.audio.play('whistle');
-        this.audio.speak('Paused.');
         if (this.playDiagram) { this.playDiagram.destroy(); this.playDiagram = null; }
-        this.pauseOverlay = this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.6).setDepth(39).setScrollFactor(0);
+
+        // Prefer the shared <benny-pause-overlay> for the MAIN menu; fall back to the
+        // bespoke in-canvas pause menu when the shared module is absent. The DOM
+        // overlay brings its own dim backdrop (and speaks "Paused" via the voice
+        // manager), so the canvas dim + spoken "Paused." stay on the fallback path
+        // and the canvas-rendered settings sub-view.
+        this.pauseOverlayCtrl = new PauseOverlayController({
+            actions: this._mainPauseActions(),
+            scanManager: window.NarbeScanManager,
+            voice: window.NarbeVoiceManager,
+            audio: this.audio,
+        });
+        if (this.pauseOverlayCtrl.create()) {
+            this.pauseOverlayCtrl.show();
+            return;
+        }
+
+        // Fallback: bespoke in-canvas pause menu (unchanged behaviour).
+        this.pauseOverlayCtrl = null;
+        this.audio.speak('Paused.');
+        this._ensurePauseBackdrop();
         this.showPauseMenu();
+    }
+
+    // True while the shared overlay is driving the MAIN pause menu. The settings
+    // sub-view (pauseView === 'settings') always uses the bespoke in-canvas ScanList.
+    _sharedPauseActive() {
+        return !!(this.pauseOverlayCtrl && this.pauseOverlayCtrl.isOpen() && this.pauseView === 'main');
+    }
+
+    // Dim canvas backdrop behind the bespoke pause menu / settings sub-view. The
+    // shared DOM overlay supplies its own backdrop, so this is canvas-paths only.
+    _ensurePauseBackdrop() {
+        if (!this.pauseOverlay) {
+            this.pauseOverlay = this.add.rectangle(W / 2, H / 2, W, H, 0x000000, 0.6).setDepth(39).setScrollFactor(0);
+        }
+    }
+    _removePauseBackdrop() {
+        if (this.pauseOverlay) { this.pauseOverlay.destroy(); this.pauseOverlay = null; }
+    }
+
+    // The MAIN pause options — single source of truth shared by the bespoke
+    // in-canvas ScanList and the shared overlay's action list (labels verbatim).
+    _mainPauseOptions() {
+        return [
+            { label: 'Continue Game', value: 'continue' },
+            { label: 'Settings',      value: 'settings' },
+            { label: 'Main Menu',     value: 'menu' }
+        ];
+    }
+
+    // Map the MAIN options to the overlay's { id, label, onSelect } contract,
+    // reusing onPauseSelect verbatim so labels and handlers are unchanged.
+    _mainPauseActions() {
+        return this._mainPauseOptions().map(o => ({
+            id: o.value,
+            label: o.label,
+            onSelect: () => this.onPauseSelect(o.value),
+        }));
     }
 
     showPauseMenu(restoreIndex = -1) {
@@ -3365,11 +3433,7 @@ class GameScene extends Phaser.Scene {
             ];
         } else {
             title = 'PAUSED';
-            opts = [
-                { label: 'Continue Game', value: 'continue' },
-                { label: 'Settings',      value: 'settings' },
-                { label: 'Main Menu',     value: 'menu' }
-            ];
+            opts = this._mainPauseOptions();
         }
         this.pauseMenu = new ScanList(this, {
             x: W / 2, y: H / 2, options: opts, audio: a, title, itemW: 340,
@@ -3388,8 +3452,25 @@ class GameScene extends Phaser.Scene {
         const vm = window.NarbeVoiceManager;
         const idx = this.pauseMenu ? this.pauseMenu.index : -1;
         if (value === 'continue') { this.closePause(); }
-        else if (value === 'settings') { this.pauseView = 'settings'; this.showPauseMenu(); }
-        else if (value === 'back') { this.pauseView = 'main'; this.showPauseMenu(); }
+        else if (value === 'settings') {
+            this.pauseView = 'settings';
+            // Settings is canvas-rendered (not part of the overlay contract): hand the
+            // screen from the shared overlay to the in-canvas ScanList.
+            if (this.pauseOverlayCtrl) this.pauseOverlayCtrl.hide();
+            this._ensurePauseBackdrop();
+            this.showPauseMenu();
+        }
+        else if (value === 'back') {
+            this.pauseView = 'main';
+            if (this.pauseOverlayCtrl) {
+                // Return the MAIN menu to the shared overlay.
+                if (this.pauseMenu) { this.pauseMenu.destroy(); this.pauseMenu = null; }
+                this._removePauseBackdrop();
+                this.pauseOverlayCtrl.show();
+            } else {
+                this.showPauseMenu();
+            }
+        }
         else if (value === 'menu') { this.closePause(); this.scene.start('TitleScene'); }
         else if (value === 'music') { a.toggleMusic(); this.showPauseMenu(idx); }
         else if (value === 'sfx') {
@@ -3435,6 +3516,7 @@ class GameScene extends Phaser.Scene {
 
     closePause() {
         this.paused = false;
+        if (this.pauseOverlayCtrl) { this.pauseOverlayCtrl.destroy(); this.pauseOverlayCtrl = null; }
         if (this.pauseMenu) { this.pauseMenu.destroy(); this.pauseMenu = null; }
         if (this.pauseOverlay) { this.pauseOverlay.destroy(); this.pauseOverlay = null; }
         // Re-sync the live game menu's auto-scan timer with the current setting so
@@ -3926,4 +4008,10 @@ class ResultScene extends Phaser.Scene {
             this.scene.start('TitleScene');
         }
     }
+}
+
+// CommonJS surface so the jsdom test harness can require() these scenes. No-op in
+// the browser (module is undefined there); does not change runtime behavior.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { GameScene, ResultScene };
 }
