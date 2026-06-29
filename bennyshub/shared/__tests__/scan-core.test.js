@@ -923,3 +923,54 @@ describe("Debounce floors (minPressMs / minSelectMs)", () => {
     expect(onPause).toHaveBeenCalled();
   });
 });
+
+describe("Anti-tremor rate limit (minIntervalMs)", () => {
+  test("default (0): consecutive advances are both accepted (no regression)", () => {
+    const { controller } = buildController();
+    track(controller).attach();
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space");
+    expect(controller.getIndex()).toBe(1);
+  });
+
+  test("rejects a second advance that lands sooner than minIntervalMs", () => {
+    const { controller } = buildController({ options: { minIntervalMs: 50 } });
+    track(controller).attach();
+
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // t=0 -> advance to 0
+    expect(controller.getIndex()).toBe(0);
+
+    jest.advanceTimersByTime(30); // 30ms < 50ms
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // rejected (too fast)
+    expect(controller.getIndex()).toBe(0);
+
+    jest.advanceTimersByTime(30); // now 60ms since last accepted
+    dispatchKey("keydown", "Space");
+    dispatchKey("keyup", "Space"); // accepted
+    expect(controller.getIndex()).toBe(1);
+  });
+
+  test("rate limit also gates select", () => {
+    const { controller, onSelect } = buildController({
+      options: { minIntervalMs: 50 },
+    });
+    track(controller).attach();
+    controller.focusIndex(0);
+
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // t=0 select
+    jest.advanceTimersByTime(30);
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // rejected
+    expect(onSelect).toHaveBeenCalledTimes(1);
+
+    jest.advanceTimersByTime(30);
+    dispatchKey("keydown", "Enter");
+    dispatchKey("keyup", "Enter"); // accepted
+    expect(onSelect).toHaveBeenCalledTimes(2);
+  });
+});

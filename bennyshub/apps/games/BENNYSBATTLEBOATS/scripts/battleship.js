@@ -2931,6 +2931,7 @@ function setupScan() {
         spaceHoldMs: config.longPress,         // hold Space >= 3s -> reverse scan
         reverseCadenceMs: resolveScanInterval(),
         enterHoldMs: config.pauseLongPress,    // hold Enter >= 5s -> pause (game) / back (placement cell)
+        minIntervalMs: window.NarbeScanManager && window.NarbeScanManager.getInputSensitivity ? window.NarbeScanManager.getInputSensitivity() : 50, // anti-tremor rate limit (restored: pre-migration getInputSensitivity()||50)
         scanManager: window.NarbeScanManager,
         voice: window.NarbeVoiceManager
     });
