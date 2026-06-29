@@ -117,13 +117,6 @@
   let inRowSelectionMode = true;
   let currentRowIndex = 0;
   let currentButtonIndex = 0;
-  let spacebarPressed = false;
-  let returnPressed = false;
-  let spacebarPressTime = null;
-  let returnPressTime = null;
-  let longPressTriggered = false;
-  let backwardScanInterval = null;
-  let backwardScanningOccurred = false; // Track if backward scanning actually happened
 
   // Text state
   let buffer = "";
@@ -216,324 +209,266 @@
     highlightTextBox();
   }
 
-  document.addEventListener("keydown", (e) => {
-    if (e.code === "Space") {
-      e.preventDefault();
-      startScanning();
-    } else if (e.code === "Enter") {
-      e.preventDefault();
-      startSelecting();
-    }
-  });
+  // ================================================================ //
+  //  Scanning via the shared ScanController (nested rows -> buttons)  //
+  // ================================================================ //
+  //
+  // The keyboard scans TWO levels: pick a ROW (text bar -> keyboard rows ->
+  // predictive row), then scan the BUTTONS within that row. That is exactly the
+  // shape ScanController's nested mode models, so the controller now owns the
+  // scan index, the Space short/hold (forward / reverse) loop and the Enter
+  // short/hold (select / jump-back) behaviour. The app keeps its battle-tested
+  // highlight*/speak* helpers and the legacy index variables those helpers read
+  // (currentRowIndex / currentButtonIndex / inRowSelectionMode); they are kept
+  // in sync FROM the controller so the on-screen + spoken behaviour is unchanged.
+  //
+  // Group ordering mirrors the legacy row order EXACTLY:
+  //   index 0                  -> text bar (speak-on-select; no sub-buttons)
+  //   index 1 .. rows.length   -> keyboard rows (rows[0 .. rows.length-1])
+  //   index rows.length + 1    -> predictive row (the chips)
+  // Because this matches the old currentRowIndex values, the existing helpers
+  // (highlightRow, highlightButton, speakRowTitle, ...) work verbatim.
 
-  document.addEventListener("keyup", (e) => {
-    if (e.code === "Space") {
-      e.preventDefault();
-      stopScanning();
-    } else if (e.code === "Enter") {
-      e.preventDefault();
-      stopSelecting();
-    }
-  });
+  const PREDICTIVE_GROUP_INDEX = rows.length + 1;
 
-  function startScanning() {
-    if (!spacebarPressed) {
-      spacebarPressed = true;
-      spacebarPressTime = Date.now();
-      backwardScanningOccurred = false; // Reset backward scanning flag
-      console.log("Spacebar pressed");
-      
-      const speed = scanSpeeds[currentScanSpeed];
-      
-      setTimeout(() => {
-        if (spacebarPressed && (Date.now() - spacebarPressTime) >= speed.longPress) {
-          console.log("Long press detected - starting backward scanning");
-          backwardScanInterval = setInterval(() => {
-            if (spacebarPressed) {
-              backwardScanningOccurred = true; // Mark that backward scanning is happening
-              if (inSettingsMode) {
-                scanSettingsBackward();
-              } else {
-                scanBackward();
-              }
-            }
-          }, speed.backward);
-        }
-      }, speed.longPress);
+  let kbScan = null;
+  let settingsScan = null;
+
+  function getGroups() {
+    const groups = [{ type: "textbar" }];
+    for (let r = 0; r < rows.length; r++) {
+      groups.push({ type: "kbrow", rowIndex: r });
     }
+    groups.push({ type: "predictive" });
+    return groups;
   }
 
-  function stopScanning() {
-    if (spacebarPressed) {
-      spacebarPressed = false;
-      const pressDuration = Date.now() - spacebarPressTime;
-      console.log(`Spacebar released after ${pressDuration}ms, backward scanning occurred: ${backwardScanningOccurred}`);
-      
-      if (backwardScanInterval) {
-        clearInterval(backwardScanInterval);
-        backwardScanInterval = null;
+  function getItems(group) {
+    if (!group) return [];
+    if (group.type === "kbrow") {
+      const start = group.rowIndex * 6;
+      const allKeys = kb.querySelectorAll(".key");
+      const items = [];
+      for (let i = 0; i < rows[group.rowIndex].length; i++) {
+        items.push(allKeys[start + i]);
       }
-      
-      const speed = scanSpeeds[currentScanSpeed];
-      
-      // Forward scan if:
-      // 1. Short press (250ms to longPress threshold), OR
-      // 2. Long press but no backward scanning actually occurred
-      if ((pressDuration >= 250 && pressDuration <= speed.longPress) || 
-          (pressDuration > speed.longPress && !backwardScanningOccurred)) {
-        console.log("Triggering forward scan - either short press or long press without backward scanning");
-        if (inSettingsMode) {
-          scanSettingsForward();
-        } else {
-          scanForward();
-        }
-      } else if (backwardScanningOccurred) {
-        console.log("Long press with backward scanning - no forward scan on release");
-      }
-      
-      spacebarPressTime = null;
-      backwardScanningOccurred = false; // Reset for next press
+      return items;
     }
+    if (group.type === "predictive") {
+      // All six chips (including disabled/empty slots) - matches the legacy
+      // predictive-row navigation, which stepped through every chip slot.
+      return Array.from(predictBar.querySelectorAll(".chip"));
+    }
+    return []; // text bar has no sub-buttons (handled via descend override below)
   }
 
-  function startSelecting() {
-    if (!returnPressed) {
-      returnPressed = true;
-      returnPressTime = Date.now();
-      longPressTriggered = false;
-      console.log("Return pressed");
-      
-      setTimeout(() => {
-        if (returnPressed && (Date.now() - returnPressTime) >= 3000) {
-          handleLongPress();
-        }
-      }, 3000);
-    }
-  }
-
-  function stopSelecting() {
-    if (returnPressed) {
-      returnPressed = false;
-      const pressDuration = Date.now() - returnPressTime;
-      console.log(`Return released after ${pressDuration}ms`);
-      
-      if (!longPressTriggered && pressDuration >= 100) {
-        console.log("Short press - selecting");
-        selectButton();
-      }
-      
-      returnPressTime = null;
-      longPressTriggered = false;
-    }
-  }
-
-  function handleLongPress() {
-    longPressTriggered = true;
-    clearAllHighlights();
-    
-    if (inRowSelectionMode) {
-      // Jump to predictive text row (now at the bottom - last row)
-      currentRowIndex = rows.length + 1; // Last row index (textbar=0, keyboard=1-7, predictive=8)
+  // Mirror the controller's level/index into the legacy variables the highlight
+  // and speak helpers depend on, so those helpers keep working unchanged.
+  function syncLegacyFromScan() {
+    if (kbScan.getLevel() === "item") {
+      inRowSelectionMode = false;
+      currentRowIndex = kbScan.getGroupIndex();
+      currentButtonIndex = kbScan.getIndex();
+    } else {
       inRowSelectionMode = true;
-      highlightPredictiveRow();
-      console.log("Long press: Jumped to predictive text row (bottom)");
+      const idx = kbScan.getIndex();
+      if (idx >= 0) currentRowIndex = idx;
+    }
+  }
 
-      // Read all predictive text words when entering predictive mode
+  // Highlight + speak the currently-focused row (group level) or button (item
+  // level), reproducing the legacy scanForward/scanBackward/selectButton render.
+  function renderScanFocus() {
+    syncLegacyFromScan();
+
+    if (kbScan.getLevel() === "item") {
+      clearAllHighlights();
+      if (currentRowIndex === PREDICTIVE_GROUP_INDEX) {
+        highlightPredictiveButton(currentButtonIndex);
+        speakPredictiveButtonLabel(currentButtonIndex);
+      } else {
+        highlightButton(currentButtonIndex);
+        speakButtonLabel(currentButtonIndex);
+      }
+      return;
+    }
+
+    // Group (row) level.
+    clearAllHighlights();
+    if (currentRowIndex === 0) {
+      highlightTextBox();
+    } else if (currentRowIndex === PREDICTIVE_GROUP_INDEX) {
+      highlightPredictiveRow();
       speakPredictions();
     } else {
-      inRowSelectionMode = true;
-      if (currentRowIndex === 0) {
-        highlightTextBox();
-      } else if (currentRowIndex === rows.length + 1) {
-        highlightPredictiveRow();
-        speakPredictions(); // Read all predictions instead of row title
-      } else {
-        highlightRow(currentRowIndex - 1); // Adjust for keyboard rows (1-7)
-        speakRowTitle(currentRowIndex - 1);
-      }
-      console.log("Long press: Returned to row selection mode");
+      highlightRow(currentRowIndex - 1);
+      speakRowTitle(currentRowIndex - 1);
     }
   }
 
-  function scanForward() {
-    if (inRowSelectionMode) {
-      const prevRow = currentRowIndex;
-      // Navigation: textbar(0) -> keyboard(1-7) -> predictive(8)
-      currentRowIndex = (currentRowIndex + 1) % (rows.length + 2);
-      console.log(`Scanning forward to row ${currentRowIndex}`);
-      
-      clearAllHighlights();
-      if (currentRowIndex === 0) {
-        highlightTextBox();
-      } else if (currentRowIndex === rows.length + 1) {
-        highlightPredictiveRow();
-        speakPredictions(); // Read all predictions instead of row title
-      } else {
-        highlightRow(currentRowIndex - 1); // Keyboard rows (adjust index)
-        speakRowTitle(currentRowIndex - 1);
-      }
+  // Insert a predictive word, replacing the in-progress partial word, then learn
+  // it. Shared by the predictive-chip click handler and the scan selection path
+  // (the two were byte-identical in the legacy code).
+  function applyPrediction(word) {
+    const partial = currentWord();
+    let newBuf = buffer;
+    if (partial && !buffer.endsWith(" ")) {
+      newBuf = buffer.slice(0, -partial.length) + word + " ";
     } else {
-      const prevButton = currentButtonIndex;
-      if (currentRowIndex === 0) {
-        return; // Can't navigate buttons in textbar
-      } else if (currentRowIndex === rows.length + 1) {
-        // Predictive row navigation
-        const chips = predictBar.querySelectorAll(".chip");
-        currentButtonIndex = (currentButtonIndex + 1) % chips.length;
-        highlightPredictiveButton(currentButtonIndex, prevButton);
-        speakPredictiveButtonLabel(currentButtonIndex);
-      } else {
-        // Keyboard row navigation
-        currentButtonIndex = (currentButtonIndex + 1) % rows[currentRowIndex - 1].length;
-        highlightButton(currentButtonIndex, prevButton);
-        speakButtonLabel(currentButtonIndex);
+      if (!buffer.endsWith(" ") && buffer.length) newBuf += " ";
+      newBuf += word + " ";
+    }
+    setBuffer(newBuf);
+
+    if (window.predictionSystem) {
+      try {
+        window.predictionSystem.recordLocalWord(word);
+        const context = buffer.replace("|", "").trim();
+        if (context) {
+          window.predictionSystem.recordNgram(context, word);
+        }
+      } catch (e) {
+        console.error("Error recording prediction:", e);
       }
     }
   }
 
-  function scanBackward() {
-    if (inRowSelectionMode) {
-      const prevRow = currentRowIndex;
-      currentRowIndex = (currentRowIndex - 1 + (rows.length + 2)) % (rows.length + 2);
-      console.log(`Scanning backward to row ${currentRowIndex}`);
-      
-      clearAllHighlights();
-      if (currentRowIndex === 0) {
-        highlightTextBox();
-      } else if (currentRowIndex === rows.length + 1) {
-        highlightPredictiveRow();
-        speakPredictions(); // Read all predictions instead of row title
-      } else {
-        highlightRow(currentRowIndex - 1);
-        speakRowTitle(currentRowIndex - 1);
-      }
-    } else {
-      const prevButton = currentButtonIndex;
-      if (currentRowIndex === 0) {
-        return;
-      } else if (currentRowIndex === rows.length + 1) {
-        // Predictive row navigation
-        const chips = predictBar.querySelectorAll(".chip");
-        currentButtonIndex = (currentButtonIndex - 1 + chips.length) % chips.length;
-        highlightPredictiveButton(currentButtonIndex, prevButton);
-        speakPredictiveButtonLabel(currentButtonIndex);
-      } else {
-        // Keyboard row navigation
-        currentButtonIndex = (currentButtonIndex - 1 + rows[currentRowIndex - 1].length) % rows[currentRowIndex - 1].length;
-        highlightButton(currentButtonIndex, prevButton);
-        speakButtonLabel(currentButtonIndex);
-      }
+  // Speak the current text-bar contents, learning the words after 3 reads - the
+  // legacy text-bar selection behaviour (a short Enter on the text-bar row).
+  function speakTextBar() {
+    const text = buffer.replace(/\|/g, "").trim();
+    if (!text) return;
+    speak(text);
+    ttsUseCount++;
+    console.log(`TTS use count: ${ttsUseCount} for text: "${text}"`);
+    if (ttsUseCount >= 3) {
+      console.log("3x TTS usage detected - recording words");
+      saveTextToPredictive(text);
+      ttsUseCount = 0;
     }
+  }
+
+  // Short Enter at the ITEM level: run the focused button's action, then back
+  // out to row selection (ascend) and re-announce the row. Group-level short
+  // Enter DESCENDS into the row (handled by ScanController.select via our
+  // descend override).
+  function onScanItemSelect() {
+    const group = kbScan.getCurrentGroup();
+    syncLegacyFromScan();
+
+    if (group.type === "predictive") {
+      const chips = predictBar.querySelectorAll(".chip");
+      const chip = chips[currentButtonIndex];
+      if (chip && chip.textContent.trim()) {
+        applyPrediction(chip.textContent.trim());
+      }
+      kbScan.ascend();
+      syncLegacyFromScan();
+      clearAllHighlights();
+      // Predictions changed - re-render, then re-highlight + read the row.
+      updatePredictiveButtons().then(() => {
+        highlightPredictiveRow();
+        speakPredictions();
+      });
+      return;
+    }
+
+    // Keyboard-row button.
+    const key = rows[group.rowIndex][currentButtonIndex];
+    if (group.rowIndex === 0) {
+      handleControl(key);
+    } else {
+      insertKey(key);
+    }
+    kbScan.ascend();
+    syncLegacyFromScan();
+    clearAllHighlights();
+    highlightRow(currentRowIndex - 1);
+    speakRowTitle(currentRowIndex - 1);
+  }
+
+  // Long Enter (hold) == the legacy handleLongPress: at the row level jump
+  // straight to the predictive row; in button mode back out to row selection.
+  function onScanPause() {
+    if (kbScan.getLevel() === "item") {
+      kbScan.ascend();
+      kbScan.focusIndex(kbScan.getIndex()); // re-highlight + read the restored row
+    } else {
+      kbScan.focusIndex(PREDICTIVE_GROUP_INDEX);
+    }
+  }
+
+  // Settings-menu scanning: single-axis ScanController over the settings items.
+  function renderSettingsFocus(index) {
+    settingsRowIndex = index;
+    highlightSettingsItem(index);
+    const item = settingsItems[index];
+    if (item) {
+      const label = item.querySelector(".setting-label");
+      if (label) speak(label.textContent.toLowerCase());
+    }
+  }
+
+  function buildScanControllers() {
+    const ScanControllerClass = window.ScanController;
+    if (!ScanControllerClass) {
+      console.error("ScanController not loaded - scanning will be unavailable.");
+      return;
+    }
+
+    // Manual hold timings come from the keyboard's own scanSpeeds table - the
+    // legacy behaviour: scan-speed cycling delegates to NarbeScanManager for the
+    // AUTO-scan cadence, while the press-and-hold thresholds stay fixed here.
+    const hold = scanSpeeds[currentScanSpeed] || scanSpeeds.medium;
+
+    kbScan = new ScanControllerClass({
+      getGroups,
+      getItems,
+      onFocus: () => renderScanFocus(),
+      onAnnounce: () => {}, // speech is produced inside renderScanFocus
+      onSelect: () => onScanItemSelect(),
+      onPause: () => onScanPause(),
+      spaceHoldMs: hold.longPress, // hold Space -> reverse scanning
+      reverseCadenceMs: hold.backward, // reverse step cadence
+      enterHoldMs: 3000, // hold Enter (>=3s) -> jump-to-predictive / back-out
+      wrap: true,
+      autoScan: false, // auto-scan stays app-driven (local kb_settings.autoScan)
+      getInterval: getScanInterval,
+    });
+
+    // The text bar is a scannable row, but a short Enter on it SPEAKS the text
+    // rather than descending into sub-buttons. Override descend on the instance
+    // so ScanController.select() routes the text bar to speak-and-stay.
+    const baseDescend = kbScan.descend.bind(kbScan);
+    kbScan.descend = function () {
+      const groups = getGroups();
+      const group = groups[kbScan.getIndex()];
+      if (group && group.type === "textbar") {
+        speakTextBar();
+        return kbScan; // stay at the row level
+      }
+      const result = baseDescend();
+      // Legacy parity: drilling into a row immediately focuses + reads button 0
+      // (the old selectButton drilled in AND highlighted/spoke the first button).
+      kbScan.focusIndex(0);
+      return result;
+    };
+
+    settingsScan = new ScanControllerClass({
+      getTargets: () => settingsItems,
+      onFocus: (item, index) => renderSettingsFocus(index),
+      onAnnounce: () => {},
+      onSelect: () => selectSettingsItem(),
+      spaceHoldMs: hold.longPress,
+      reverseCadenceMs: hold.backward,
+      wrap: true,
+      autoScan: false,
+      getInterval: getScanInterval,
+    });
   }
 
   async function updatePredictiveButtons() {
     await renderPredictions();
-  }
-
-  function selectButton() {
-    if (inSettingsMode) {
-      selectSettingsItem();
-      return;
-    }
-    
-    if (inRowSelectionMode) {
-      if (currentRowIndex === 0) {
-        // Textbar selection
-        const text = buffer.replace(/\|/g, "").trim();
-        if (text) {
-          speak(text);
-          ttsUseCount++;
-          console.log(`TTS use count: ${ttsUseCount} for text: "${text}"`);
-          
-          if (ttsUseCount >= 3) {
-            console.log("3x TTS usage detected - recording words");
-            saveTextToPredictive(text);
-            ttsUseCount = 0;
-          }
-        }
-      } else if (currentRowIndex === rows.length + 1) {
-        // Predictive row selection - enter button mode
-        inRowSelectionMode = false;
-        currentButtonIndex = 0;
-        clearAllHighlights();
-        const chips = predictBar.querySelectorAll(".chip");
-        if (chips.length > 0) {
-          highlightPredictiveButton(0);
-          speakPredictiveButtonLabel(0);
-        }
-      } else {
-        // Keyboard row selection - enter button mode
-        inRowSelectionMode = false;
-        currentButtonIndex = 0;
-        clearAllHighlights();
-        highlightButton(0);
-        speakButtonLabel(0);
-      }
-    } else {
-      if (currentRowIndex === 0) {
-        return;
-      } else if (currentRowIndex === rows.length + 1) {
-        // Predictive button selection
-        const chips = predictBar.querySelectorAll(".chip");
-        if (chips[currentButtonIndex] && chips[currentButtonIndex].textContent.trim()) {
-          const word = chips[currentButtonIndex].textContent.trim();
-          const currentPartialWord = currentWord();
-          let newBuffer = buffer;
-          
-          if (currentPartialWord && !buffer.endsWith(" ")) {
-            newBuffer = buffer.slice(0, -currentPartialWord.length) + word + " ";
-          } else {
-            if (!buffer.endsWith(" ") && buffer.length) newBuffer += " ";
-            newBuffer += word + " ";
-          }
-          
-          setBuffer(newBuffer);
-          
-          // Record the selected word and context
-          if (window.predictionSystem) {
-            try {
-              window.predictionSystem.recordLocalWord(word);
-              const context = buffer.replace("|", "").trim();
-              if (context) {
-                window.predictionSystem.recordNgram(context, word);
-              }
-            } catch (e) {
-              console.error('Error recording prediction:', e);
-            }
-          }
-        }
-        
-        // Return to row selection mode for Predictive Row
-        inRowSelectionMode = true;
-        clearAllHighlights();
-        
-        // Wait for predictions to update then highlight and speak
-        updatePredictiveButtons().then(() => {
-            highlightPredictiveRow();
-            speakPredictions();
-        });
-        return;
-
-      } else {
-        // Keyboard button selection
-        const key = rows[currentRowIndex - 1][currentButtonIndex];
-        if (currentRowIndex - 1 === 0) {
-          handleControl(key);
-        } else {
-          insertKey(key);
-        }
-      }
-      
-      // Return to row selection mode for Keyboard Rows
-      inRowSelectionMode = true;
-      clearAllHighlights();
-      if (currentRowIndex === 0) {
-        highlightTextBox();
-      } else {
-        highlightRow(currentRowIndex - 1);
-        speakRowTitle(currentRowIndex - 1);
-      }
-    }
   }
 
   async function renderPredictions() {
@@ -560,28 +495,7 @@
         chip.className = "chip";
         chip.textContent = w;
         chip.addEventListener("click", () => {
-          const partial = currentWord();
-          let newBuf = buffer;
-          if (partial && !buffer.endsWith(" ")) {
-            newBuf = buffer.slice(0, -partial.length) + w + " ";
-          } else {
-            if (!buffer.endsWith(" ") && buffer.length) newBuf += " ";
-            newBuf += w + " ";
-          }
-          setBuffer(newBuf);
-          
-          // Record if prediction system available
-          if (window.predictionSystem) {
-            try {
-              window.predictionSystem.recordLocalWord(w);
-              const context = buffer.replace("|", "").trim();
-              if (context) {
-                window.predictionSystem.recordNgram(context, w);
-              }
-            } catch (e) {
-              console.error('Error recording prediction:', e);
-            }
-          }
+          applyPrediction(w);
         });
         predictBar.appendChild(chip);
       });
@@ -773,6 +687,14 @@
     updateHighlightDisplay();
     updateTTSToggleDisplay(); // Add TTS toggle display update
     updateAutoScanDisplay(); // Add Auto Scan display update
+
+    // Route scanning to the settings list. Index starts at 0 (item already
+    // highlighted above); the first scan advances to item 1, matching legacy.
+    if (kbScan) kbScan.detach();
+    if (settingsScan) {
+      settingsScan.attach(document);
+      settingsScan.setIndex(0);
+    }
   }
   
   // Initialize settings click handlers ONCE using event delegation
@@ -818,6 +740,13 @@
     
     // No need to clone/replace elements - we use event delegation now
     
+    if (settingsScan) settingsScan.detach();
+    if (kbScan) {
+      kbScan.attach(document);
+      kbScan.ascend(); // ensure group level (no-op if already there)
+      kbScan.setIndex(0); // back to the text-bar row
+    }
+
     inRowSelectionMode = true;
     currentRowIndex = 0;
     highlightTextBox();
@@ -828,24 +757,6 @@
     if (settingsItems[index]) {
       settingsItems[index].classList.add("highlighted");
     }
-  }
-
-  function scanSettingsForward() {
-    settingsRowIndex = (settingsRowIndex + 1) % settingsItems.length;
-    highlightSettingsItem(settingsRowIndex);
-    
-    const item = settingsItems[settingsRowIndex];
-    const label = item.querySelector(".setting-label").textContent;
-    speak(label.toLowerCase());
-  }
-
-  function scanSettingsBackward() {
-    settingsRowIndex = (settingsRowIndex - 1 + settingsItems.length) % settingsItems.length;
-    highlightSettingsItem(settingsRowIndex);
-    
-    const item = settingsItems[settingsRowIndex];
-    const label = item.querySelector(".setting-label").textContent;
-    speak(label.toLowerCase());
   }
 
   function selectSettingsItem() {
@@ -1058,9 +969,9 @@
     
     autoScanInterval = setInterval(() => {
       if (inSettingsMode) {
-        scanSettingsForward();
+        if (settingsScan) settingsScan.advance();
       } else {
-        scanForward();
+        if (kbScan) kbScan.advance();
       }
     }, speed);
   }
@@ -1196,7 +1107,10 @@
     
     // Force immediate re-merge and re-render
     setTimeout(() => {
-      if (window.predictionSystem) {
+      if (
+        window.predictionSystem &&
+        typeof window.predictionSystem.mergeData === "function"
+      ) {
         window.predictionSystem.mergeData();
       }
       renderPredictions();
@@ -1239,6 +1153,70 @@
       }
     });
   };
+
+  // ---- Prediction engine (shared Predict, IP-3) ----
+  // Behaviourally identical to the former local predictions.js engine (same
+  // schema + same trigram->bigram->frequency cascade; see shared/predict.js).
+  // The base-data load + persistence seam replicate the original Electron/HTTP
+  // paths so swapping engines is transparent for Ben's text path.
+  function buildPredictionsProvider() {
+    const kbApi =
+      typeof window !== "undefined" &&
+      window.electronAPI &&
+      window.electronAPI.keyboard
+        ? window.electronAPI.keyboard
+        : null;
+    return {
+      async getPredictions() {
+        if (kbApi && kbApi.getPredictions) {
+          return kbApi.getPredictions();
+        }
+        try {
+          const res = await fetch("/shared/predictive_ngrams.json");
+          if (res.ok) return res.json();
+        } catch (e) {
+          console.error("Error loading predictions:", e);
+        }
+        return null;
+      },
+      async savePrediction(data) {
+        if (kbApi && kbApi.savePrediction) {
+          return kbApi.savePrediction(data);
+        }
+        try {
+          await fetch("/api/save_prediction", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
+        } catch (e) {
+          console.error("Error saving to server:", e);
+        }
+      },
+      async saveNgram(data) {
+        if (kbApi && kbApi.saveNgram) {
+          return kbApi.saveNgram(data);
+        }
+        try {
+          await fetch("/api/save_ngram", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(data),
+          });
+        } catch (e) {
+          console.error("Error saving n-gram to server:", e);
+        }
+      },
+    };
+  }
+
+  if (window.Predict && !window.predictionSystem) {
+    window.predictionSystem = window.Predict.create({
+      predictions: buildPredictionsProvider(),
+    });
+    // Load base data; sets dataLoaded = true (the init poll waits on this).
+    window.predictionSystem.load();
+  }
 
   function init() {
     console.log('Initializing keyboard...');
@@ -1284,6 +1262,15 @@
     
     console.log('Setting initial buffer...');
     setBuffer("");
+
+    // Build the scan controllers now the keyboard DOM + speed are ready, then
+    // attach the keyboard scanner and focus the text-bar row (silent - matches
+    // the legacy initial highlightTextBox()).
+    buildScanControllers();
+    if (kbScan) {
+      kbScan.attach(document);
+      kbScan.focusIndex(0);
+    }
     
     // Wait for prediction system to initialize
     const initPredictions = () => {
@@ -1307,6 +1294,15 @@
     }
     
     console.log('Keyboard initialization complete');
+  }
+
+  // Test seam (no-op in the browser, where `module` is undefined): expose the
+  // controller handles so jsdom tests can detach key listeners between runs.
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      __getKbScan: () => kbScan,
+      __getSettingsScan: () => settingsScan,
+    };
   }
 
   init();
