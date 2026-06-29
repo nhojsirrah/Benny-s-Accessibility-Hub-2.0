@@ -5,19 +5,11 @@ const config = {
   enterLongPress: 6000,
 };
 
-const themes = [
-  { name: "Default", bg: "linear-gradient(135deg, #ff4b1f, #ff9068)" },
-  { name: "Ocean", bg: "linear-gradient(135deg, #2193b0, #6dd5ed)" },
-  { name: "Midnight", bg: "linear-gradient(135deg, #232526, #414345)" },
-  { name: "Forest", bg: "linear-gradient(135deg, #134e5e, #71b280)" },
-  { name: "Sunset", bg: "linear-gradient(135deg, #f12711, #f5af19)" },
-  { name: "Lavender", bg: "linear-gradient(135deg, #834d9b, #d04ed6)" },
-  { name: "Mint", bg: "linear-gradient(135deg, #00b09b, #96c93d)" },
-  {
-    name: "Dark Blue",
-    bg: "linear-gradient(135deg, #0f2027, #203a43, #2c5364)",
-  },
-];
+// Background themes come from the shared Themes module (loaded via
+// <script src="../../../shared/themes.js">). The local array that used to live
+// here was byte-identical to Themes.THEMES (the background gradients are pinned
+// by shared/__tests__/themes.test.js), so this is a behavior-preserving swap.
+const themes = window.Themes.THEMES;
 
 const basicColors = [
   "Red",
@@ -36,21 +28,10 @@ const basicColors = [
   "Black",
 ];
 
-const highlightColors = [
-  "Theme Default",
-  "Yellow",
-  "White",
-  "Cyan",
-  "Lime",
-  "Magenta",
-  "Red",
-  "Orange",
-  "Pink",
-  "Gold",
-  "DeepSkyBlue",
-  "SpringGreen",
-  "Violet",
-];
+// Highlight palette from the shared Themes module. TicTacToe's local 13-entry
+// list was identical to Themes.HIGHLIGHT_COLORS (pinned verbatim by the shared
+// themes snapshot test), so the resolved colors are unchanged.
+const highlightColors = window.Themes.HIGHLIGHT_COLORS;
 
 // Note: Scan speeds are now managed by NarbeScanManager.
 // The scan loop (forward/backward stepping, hold-to-reverse, hold-to-pause,
@@ -123,14 +104,32 @@ function init() {
   showMainMenu();
 }
 
+// Settings are persisted through the shared SettingsStore. The cross-app keys
+// (scan speed + highlight) live in the global store; the rest are TicTacToe's
+// per-app keys. SettingsStore runs the `tictactoe_settings` migration on first
+// read, converting the legacy localStorage blob into these canonical stores.
+const APP_ID = "tictactoe";
+const GLOBAL_SETTING_KEYS = [
+  "scanSpeedIndex",
+  "highlightColorIndex",
+  "highlightStyle",
+];
+
+function storeForSetting(key) {
+  return GLOBAL_SETTING_KEYS.indexOf(key) !== -1
+    ? window.SettingsStore.global
+    : window.SettingsStore.app(APP_ID);
+}
+
 function loadSettings() {
   try {
-    const saved = localStorage.getItem("tictactoe_settings");
-    if (saved) {
-      Object.assign(settings, JSON.parse(saved));
-      if (settings.scanSpeedIndex >= scanSpeeds.length)
-        settings.scanSpeedIndex = 0;
-    }
+    // Idempotent — converts the legacy `tictactoe_settings` blob on first run.
+    window.SettingsStore.runMigrations();
+    Object.keys(settings).forEach((key) => {
+      const stored = storeForSetting(key).get(key);
+      if (stored !== undefined) settings[key] = stored;
+    });
+    // Game stats are not part of the typed settings schema; keep them local.
     const savedStats = localStorage.getItem("tictactoe_stats");
     if (savedStats) {
       Object.assign(gameStats, JSON.parse(savedStats));
@@ -141,7 +140,9 @@ function loadSettings() {
 }
 
 function saveSettings() {
-  localStorage.setItem("tictactoe_settings", JSON.stringify(settings));
+  Object.keys(settings).forEach((key) => {
+    storeForSetting(key).set(key, settings[key]);
+  });
   localStorage.setItem("tictactoe_stats", JSON.stringify(gameStats));
 }
 
@@ -377,6 +378,23 @@ function getColorSwatch(color) {
   return `<span style="display:inline-block; width:24px; height:24px; background-color:${color}; border:2px solid #fff; margin-left:10px; vertical-align:middle; border-radius: 50%; box-shadow: 0 2px 4px rgba(0,0,0,0.3);"></span>`;
 }
 
+// Leave the app / return to the hub via the shared Nav module, which sends the
+// hub's `{ action: 'closeApp' }` iframe contract (the hub also accepts the older
+// `focusBackButton` alias this app used to post). Falls back to the original
+// standalone path if Nav is unavailable.
+function exitToHub() {
+  speak("Exiting to Hub");
+  setTimeout(() => {
+    if (window.Nav && typeof window.Nav.goBack === "function") {
+      window.Nav.goBack();
+    } else if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ action: "focusBackButton" }, "*");
+    } else {
+      window.location.href = "../../../index.html";
+    }
+  }, 500);
+}
+
 const menus = {
   main: [
     { text: "Single Player", action: () => startGame("single") },
@@ -384,16 +402,7 @@ const menus = {
     { text: "Settings", action: () => showSettingsMenu() },
     {
       text: "Exit",
-      action: () => {
-        speak("Exiting to Hub");
-        setTimeout(() => {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage({ action: "focusBackButton" }, "*");
-          } else {
-            window.location.href = "../../../index.html";
-          }
-        }, 500);
-      },
+      action: () => exitToHub(),
     },
   ],
   settings: [
@@ -462,16 +471,7 @@ const menus = {
     { text: "Return to Menu", action: () => showMainMenu() },
     {
       text: "Exit",
-      action: () => {
-        speak("Exiting to Hub");
-        setTimeout(() => {
-          if (window.parent && window.parent !== window) {
-            window.parent.postMessage({ action: "focusBackButton" }, "*");
-          } else {
-            window.location.href = "../../../index.html";
-          }
-        }, 500);
-      },
+      action: () => exitToHub(),
     },
   ],
   pauseSettings: [
@@ -1039,10 +1039,14 @@ function checkWin() {
 // --- UI Updates ---
 
 function getHighlightColor() {
-  const name = highlightColors[settings.highlightColorIndex];
-  if (name === "Theme Default") return "#ffcc00"; // Default fallback
-  // We can rely on CSS color names for the rest
-  return name;
+  // Resolve via the shared Themes module. For concrete colors this returns the
+  // CSS color name unchanged (identical to before); for "Theme Default" it now
+  // resolves to the active theme's own highlight (the canonical behavior the
+  // shared module defines) instead of the old flat "#ffcc00" fallback.
+  return window.Themes.getThemeHighlight(
+    themes[settings.themeIndex],
+    settings.highlightColorIndex,
+  );
 }
 
 function updateHighlights() {
@@ -1148,6 +1152,10 @@ if (typeof module !== "undefined" && module.exports) {
     showPauseMenu,
     resumeGame,
     cellIndexOf,
+    exitToHub,
+    getHighlightColor,
+    loadSettings,
+    saveSettings,
     getScan: () => scan,
   };
 }
